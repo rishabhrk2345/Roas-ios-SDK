@@ -3,16 +3,19 @@ import os.log
 #if canImport(UIKit)
 import UIKit
 #endif
-#if canImport(AdSupport)
+// `os(iOS)`, NOT `canImport`, for all four of these. Every one of them imports
+// perfectly well on macOS -- which is why the guards read as correct -- but the
+// APIs behind them do not exist there: SKAdNetwork is `unavailable in macOS`
+// outright, ATTrackingManager is macOS 11+, AAAttribution is macOS 11.1+, and
+// `Package.swift` declares macOS 10.15 so the parity tests can run on a Mac host
+// with no simulator. A canImport guard therefore compiles on iOS and breaks
+// `swift build` on the host -- which is exactly what it did, invisibly, until
+// someone first built the macOS slice. `DeviceLocation.swift` carries the same
+// note for the same reason.
+#if os(iOS)
 import AdSupport
-#endif
-#if canImport(AppTrackingTransparency)
 import AppTrackingTransparency
-#endif
-#if canImport(AdServices)
 import AdServices
-#endif
-#if canImport(StoreKit)
 import StoreKit
 #endif
 #if canImport(Network)
@@ -512,7 +515,7 @@ enum DeviceContext {
     /// otherwise (the system hands back all-zeros, which we never send). Opt-out is
     /// respected: no consent, no id.
     static func advertisingIdentifier() -> String? {
-        #if canImport(AdSupport) && canImport(AppTrackingTransparency)
+        #if os(iOS)
         if #available(iOS 14, *) {
             guard ATTrackingManager.trackingAuthorizationStatus == .authorized else { return nil }
         }
@@ -527,7 +530,7 @@ enum DeviceContext {
     /// is unavailable. The caller reports the install AFTER this resolves, so the
     /// IDFA is available on first-open when the user allowed it.
     static func requestTracking(_ completion: @escaping () -> Void) {
-        #if canImport(AppTrackingTransparency)
+        #if os(iOS)
         if #available(iOS 14, *) {
             // iOS TERMINATES the host app — not an error, a hard crash — if this
             // is called without NSUserTrackingUsageDescription in Info.plist. The
@@ -586,7 +589,7 @@ enum DeviceContext {
     }
 
     static func appleSearchAds() -> AsaResult {
-        #if canImport(AdServices)
+        #if os(iOS)
         if #available(iOS 14.3, *) {
             do {
                 let token = try AAAttribution.attributionToken()
@@ -623,7 +626,7 @@ enum DeviceContext {
     /// Register the install with SKAdNetwork / AdAttributionKit so the ad network
     /// can attribute it. Best-effort; call once at first launch.
     static func registerForAdNetworkAttribution() {
-        #if canImport(StoreKit)
+        #if os(iOS)
         if #available(iOS 16.1, *) {
             SKAdNetwork.updatePostbackConversionValue(0) { _ in }
         } else if #available(iOS 11.3, *) {
@@ -647,7 +650,7 @@ enum DeviceContext {
     /// postback early. Off by default: it trades all later conversion data for
     /// speed, which is only the right call once the value is genuinely final.
     static func updateConversionValue(_ value: Int, coarse: String?, lockWindow: Bool) {
-        #if canImport(StoreKit)
+        #if os(iOS)
         if #available(iOS 16.1, *) {
             if let coarse = coarse, let mapped = coarseValue(coarse) {
                 SKAdNetwork.updatePostbackConversionValue(
@@ -664,7 +667,7 @@ enum DeviceContext {
         #endif
     }
 
-    #if canImport(StoreKit)
+    #if os(iOS)
     /// The strings the backend schema uses (`{"coarse": {"high": …, "low": …}}`)
     /// mapped to Apple's enum. Unknown input returns nil and the caller falls
     /// back to a fine-only update rather than guessing a bucket.
