@@ -281,17 +281,34 @@ enum DeviceContext {
     /// than tidy.
     static func installTimes() -> (Int64?, Int64?) {
         let manager = FileManager.default
-        func created(_ url: URL?) -> Int64? {
+        /// Creation date, falling back to modification date. Both are optional
+        /// in `attributesOfItem` and which one a path carries is not something
+        /// to rely on -- see the bundle chain below.
+        func stamp(_ url: URL?) -> Int64? {
             guard
                 let url = url,
-                let attrs = try? manager.attributesOfItem(atPath: url.path),
-                let date = attrs[.creationDate] as? Date
+                let attrs = try? manager.attributesOfItem(atPath: url.path)
             else { return nil }
-            let seconds = Int64(date.timeIntervalSince1970)
-            return seconds > 0 ? seconds : nil
+            let date = (attrs[.creationDate] as? Date) ?? (attrs[.modificationDate] as? Date)
+            guard let seconds = date.map({ Int64($0.timeIntervalSince1970) }), seconds > 0 else {
+                return nil
+            }
+            return seconds
         }
         let documents = manager.urls(for: .documentDirectory, in: .userDomainMask).first
-        return (created(documents), created(Bundle.main.bundleURL))
+        // The `.app` bundle reports no creation date on a real device -- it
+        // sits on a sealed, read-only volume -- while the Simulator hands one
+        // over happily. Measured on an iPhone 12 mini running iOS 16.7:
+        // `first_install_at` arrived and `last_update_at` was empty, on a build
+        // where the Simulator had reported both. So try outward: the bundle,
+        // then the container directory holding it, then the executable. The
+        // first that answers wins; if none do the field is simply absent, which
+        // is the rule everywhere else in this file.
+        let bundle = Bundle.main.bundleURL
+        let lastUpdate = stamp(bundle)
+            ?? stamp(bundle.deletingLastPathComponent())
+            ?? stamp(Bundle.main.executableURL)
+        return (stamp(documents), lastUpdate)
     }
 
     private static func sysctlString(_ name: String) -> String {
@@ -620,7 +637,20 @@ enum DeviceContext {
     /// the device and will say the same thing forever, and both `ASA_OK`
     /// variants already succeeded.
     static func isTransientAsaStatus(_ status: String) -> Bool {
-        status.hasPrefix("ASA_ERROR:")
+        #if targetEnvironment(simulator)
+        // AdServices does not work in the Simulator at all -- it returns an
+        // error on every call, forever -- so no number of retries can produce a
+        // token. Retrying there spends the five-launch budget on a certainty
+        // and fills a QA log with failures that mean nothing. Observed as
+        // `ASA_ERROR:3` on an iPhone 15 Pro Simulator.
+        //
+        // Deliberately keyed on the Simulator rather than on error code 3:
+        // whatever that code turns out to mean on a real device, "AdServices
+        // cannot work here" is provable from the build environment alone.
+        return false
+        #else
+        return status.hasPrefix("ASA_ERROR:")
+        #endif
     }
 
     /// Register the install with SKAdNetwork / AdAttributionKit so the ad network
