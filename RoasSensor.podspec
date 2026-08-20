@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'RoasSensor'
-  s.version          = '0.1.6'
+  s.version          = '0.1.7'
   s.summary          = 'ROASSensor iOS tracking SDK — install attribution, funnel events, identity.'
   s.description      = <<-DESC
     Native iOS tracking for ROASSensor: install reporting (Apple Search Ads

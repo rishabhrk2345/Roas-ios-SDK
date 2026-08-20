@@ -76,12 +76,18 @@ enum DeviceContext {
     /// makes rows trace to the wrong build. `DeviceInfo.SDK_VERSION` carries the
     /// identical warning on Android for the identical reason.
     ///
-    /// Held level with Android's `DeviceInfo.SDK_VERSION` (0.1.6) rather than
-    /// continuing an independent iOS count: `roas_flutter` ships one version
-    /// number for both platforms, and the Setup page's "SDK versions reporting"
-    /// check asks a customer to confirm the value they pinned in `pubspec.yaml`.
-    /// Two counters make that check fail on iOS for a build that is correct.
-    static let sdkVersion = "0.1.6"
+    /// This string, `RoasSensor.podspec`'s version, and the git TAG must all
+    /// agree. That triple is what makes a row traceable: SPM and CocoaPods
+    /// resolve the tag, the beacon reports this, and a mismatch means a bad row
+    /// points at a build that did not produce it.
+    ///
+    /// It tracked Android's `DeviceInfo.SDK_VERSION` up to 0.1.6, on the theory
+    /// that one number should answer "which SDK am I on" across both platforms.
+    /// That broke here: 0.1.7 is an iOS-only fix (the ATT prompt, which 0.1.6
+    /// silently skipped on any Flutter host), and holding it at 0.1.6 to match
+    /// Android would leave two builds with genuinely different behaviour
+    /// reporting the same version -- defeating the one thing the field is for.
+    static let sdkVersion = "0.1.7"
 
     /// The hardware identifier — `iPhone14,5`, `iPad13,1`. The iOS analogue of
     /// Android's `Build.MODEL`: the key Apple's own device tables join on, and
@@ -576,19 +582,94 @@ enum DeviceContext {
                 completion()
                 return
             }
-            // The ATT prompt only appears while the app is in the *active* state;
-            // a request fired a split-second too early (e.g. from onAppear on the
-            // very first launch) is silently ignored and returns .notDetermined
-            // with no prompt. A short main-thread delay lets the app finish
-            // becoming active first, so the prompt reliably shows.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                ATTrackingManager.requestTrackingAuthorization { _ in completion() }
-            }
+            promptWhenActive(completion)
             return
         }
         #endif
         completion()
     }
+
+    #if os(iOS)
+    /// How long to wait for the app to become active before giving up on the
+    /// prompt. Generous, because the cost of it being too short is a silently
+    /// skipped prompt, while the cost of being too long is a delayed install
+    /// report on an app that was never going to foreground anyway.
+    private static let activeWaitSeconds: TimeInterval = 10
+
+    /// One-shot guard: `completion` must run exactly once, whichever of the
+    /// paths below reaches it first. It is not optional — `Roas.configure` runs
+    /// `reportFirstOpen` *inside* this completion, so a path that fails to call
+    /// it does not merely lose the IDFA, it loses the install.
+    private final class PromptState {
+        private let lock = NSLock()
+        private var finished = false
+        /// Main-thread only, so no lock: set when the prompt is actually shown.
+        var promptShown = false
+        private let completion: () -> Void
+
+        init(_ completion: @escaping () -> Void) { self.completion = completion }
+
+        func finish() {
+            lock.lock()
+            let already = finished
+            finished = true
+            lock.unlock()
+            if !already { completion() }
+        }
+    }
+
+    /// Raise the ATT prompt once the app is genuinely `.active`.
+    ///
+    /// iOS only displays this dialog while the app is active. A request fired a
+    /// moment too early is **silently discarded** — no prompt, no answer
+    /// recorded, and `.notDetermined` returned as though the user had never
+    /// been asked. There is no error and nothing in the log.
+    ///
+    /// This used to be a flat 0.6s delay, tuned against a native SwiftUI app
+    /// calling `configure` from `onAppear`, where the view is already on screen.
+    /// It is not enough for **Flutter**, where `Roas.initialize` runs from Dart
+    /// `main()` before `runApp()` and the engine has yet to boot, load Dart and
+    /// render a first frame. Measured on an iPhone 12 mini: no prompt at launch,
+    /// the app absent from Settings → Privacy & Security → Tracking (which lists
+    /// only apps that have actually asked), and the IDFA lost for the life of the
+    /// install unless something called `requestTracking` again later. Every
+    /// Flutter host was losing its launch-time prompt this way.
+    ///
+    /// So: ask now if we are active, otherwise wait for `didBecomeActive` — the
+    /// real signal rather than a guess at how long it takes to arrive.
+    @available(iOS 14, *)
+    private static func promptWhenActive(_ completion: @escaping () -> Void) {
+        let state = PromptState(completion)
+
+        func prompt() {
+            state.promptShown = true
+            ATTrackingManager.requestTrackingAuthorization { _ in state.finish() }
+        }
+
+        DispatchQueue.main.async {
+            if UIApplication.shared.applicationState == .active {
+                prompt()
+                return
+            }
+            var observer: NSObjectProtocol?
+            observer = NotificationCenter.default.addObserver(
+                forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+            ) { _ in
+                if let observer = observer { NotificationCenter.default.removeObserver(observer) }
+                prompt()
+            }
+            // The install report cannot wait forever on an app that never
+            // foregrounds. If the prompt is already up when this fires we do
+            // NOT cut it short — a visible prompt means the app is active and
+            // the user is mid-answer; `identify()` re-reads the IDFA afterwards
+            // either way.
+            DispatchQueue.main.asyncAfter(deadline: .now() + activeWaitSeconds) {
+                if let observer = observer { NotificationCenter.default.removeObserver(observer) }
+                if !state.promptShown { state.finish() }
+            }
+        }
+    }
+    #endif
 
     /// An Apple Search Ads read: the token, and **why** when there isn't one.
     ///

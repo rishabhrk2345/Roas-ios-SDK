@@ -31,15 +31,14 @@ final class DeviceContextTests: XCTestCase {
         XCTAssertEqual(snapshot["device_manufacturer"] as? String, "Apple")
     }
 
-    func testSdkVersionMatchesAndroid() {
-        // Held level with `DeviceInfo.SDK_VERSION` on purpose: roas_flutter
-        // ships ONE version number for both platforms, and the Setup page asks
-        // a customer to confirm the value they pinned in pubspec.yaml. Two
-        // counters make that check fail on iOS for a build that is correct.
+    func testSdkVersionMatchesTheRelease() {
+        // This string, the podspec's version and the git TAG must all agree --
+        // SPM and CocoaPods resolve the tag, the beacon reports this, and a
+        // mismatch makes a bad row point at a build that did not produce it.
         //
-        // If this fails because Android moved, bump `DeviceContext.sdkVersion`
-        // and `RoasSensor.podspec` together -- not just this assertion.
-        XCTAssertEqual(DeviceContext.sdkVersion, "0.1.6")
+        // If this fails, bump all three together. Changing only the assertion
+        // is how the triple drifts apart.
+        XCTAssertEqual(DeviceContext.sdkVersion, "0.1.7")
     }
 
     func testSnapshotOmitsEmptyValuesRatherThanSendingBlanks() {
