@@ -38,7 +38,7 @@ final class DeviceContextTests: XCTestCase {
         //
         // If this fails, bump all three together. Changing only the assertion
         // is how the triple drifts apart.
-        XCTAssertEqual(DeviceContext.sdkVersion, "0.1.7")
+        XCTAssertEqual(DeviceContext.sdkVersion, "0.1.8")
     }
 
     func testSnapshotOmitsEmptyValuesRatherThanSendingBlanks() {

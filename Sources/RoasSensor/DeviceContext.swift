@@ -87,7 +87,14 @@ enum DeviceContext {
     /// silently skipped on any Flutter host), and holding it at 0.1.6 to match
     /// Android would leave two builds with genuinely different behaviour
     /// reporting the same version -- defeating the one thing the field is for.
-    static let sdkVersion = "0.1.7"
+    ///
+    /// 0.1.8 is again iOS-only: `installerSource()` labelled every TestFlight
+    /// install `development`, because it required the App Store receipt FILE to
+    /// exist and that file is routinely absent on first launch. Three real
+    /// installs across two iPhones reported it; this is the column that
+    /// separates the customer's own QA from real users, so a build that cannot
+    /// tell the two apart needs its own number.
+    static let sdkVersion = "0.1.8"
 
     /// The hardware identifier — `iPhone14,5`, `iPad13,1`. The iOS analogue of
     /// Android's `Build.MODEL`: the key Apple's own device tables join on, and
@@ -152,26 +159,40 @@ enum DeviceContext {
     /// most of the value of the integrity signals, and a TestFlight build is the
     /// single clearest QA tell iOS offers.
     ///
-    /// Four states, and the file-existence check is what separates the two that
-    /// look identical from the URL alone.
+    /// Four states. `appStoreReceiptURL` alone cannot separate them: it is non-nil
+    /// even when no receipt was ever issued, and it names a `sandboxReceipt` path
+    /// for BOTH a TestFlight install and a build run straight from Xcode. Reading
+    /// only the filename therefore labelled a developer's own debug build
+    /// `testflight` — observed on an iPhone 14 running this very SDK. This column
+    /// exists to separate the customer's own testing from real users, so that
+    /// mislabel defeats the one job it has.
     ///
-    /// `appStoreReceiptURL` is non-nil even when no receipt was ever issued, and
-    /// on a build installed straight from Xcode it points at a `sandboxReceipt`
-    /// path with **nothing at it**. Reading only the filename therefore labelled
-    /// a developer's own debug build `testflight` — observed on an iPhone 14
-    /// running this very SDK. That is not a cosmetic mislabel: this column exists
-    /// to separate the customer's own testing from real users, so a developer
-    /// build wearing a QA-channel badge defeats the one job it has.
+    /// That was first fixed by requiring the receipt FILE to exist, on the
+    /// assumption that TestFlight writes one and a development build does not.
+    /// Field data killed that assumption: three TestFlight installs across two
+    /// iPhones (12,5 and 12,8) all reported `development`, because the receipt is
+    /// written asynchronously and is routinely absent on the first launch — which
+    /// is exactly when the install beacon fires. So the check simply inverted the
+    /// error: every real tester now looked like a developer.
     ///
-    /// TestFlight installs a real sandbox receipt file; a development build does
-    /// not. So: file present + sandbox name → TestFlight, file present otherwise
-    /// → App Store, URL but no file → development.
+    /// The discriminator that does not depend on timing is the provisioning
+    /// profile. Xcode embeds `embedded.mobileprovision` in development and ad-hoc
+    /// builds; App Store Connect strips it when it processes an upload, so neither
+    /// TestFlight nor App Store builds carry one. It is present in the bundle from
+    /// the first instruction executed, so it cannot race the beacon the way a
+    /// receipt file does.
+    ///
+    /// So: profile present → development, else sandbox name → TestFlight, else
+    /// → App Store. The receipt's *name* is still read (it is environment-derived
+    /// and available immediately); only its *existence* is no longer trusted.
     static func installerSource() -> String {
         #if targetEnvironment(simulator)
         return "simulator"
         #else
+        if Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision") != nil {
+            return "development"
+        }
         guard let receipt = Bundle.main.appStoreReceiptURL else { return "" }
-        guard FileManager.default.fileExists(atPath: receipt.path) else { return "development" }
         return receipt.lastPathComponent == "sandboxReceipt" ? "testflight" : "app_store"
         #endif
     }
