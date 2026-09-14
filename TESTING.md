@@ -219,9 +219,32 @@ Checks that are easy to get wrong:
 - `uptime_seconds` should be large on a phone you have not rebooted.
 - `occurred_at` vs `created_at` -- the offline-install check from Stage 3.
 
-Session-start and install beacons carry the full device context; `identify` and
-`track` deliberately do not, and the backgrounding beacon carries only `pv_id`
-plus `engagement_ms`. A missing device field on those is correct, not a bug.
+Session-start and install beacons carry the full device context; `identify`,
+`track` and `verifyPurchase` deliberately do not, and the backgrounding beacon
+carries only `pv_id` plus `engagement_ms`. A missing device field on those is
+correct, not a bug.
+
+### `verifyPurchase` (0.1.9+)
+
+Needs a **real sandbox purchase**: a StoreKit Configuration File transaction is
+local to the device and Apple's Server API has never heard of it, so it can only
+ever answer 422. That means an App Store Connect app record with an in-app
+product and a Sandbox Apple ID -- not a `.storekit` file.
+
+The site also needs its App Store Connect API key saved (key id, issuer id,
+`.p8`). Without it the endpoint fails closed and books nothing.
+
+1. Buy in the sandbox, and confirm the app called
+   `Roas.verifyPurchase(transactionId:)` from its `Transaction.updates` loop --
+   `setOnDeliveryResult` reports `/api/tracking/mobile/purchase`.
+2. Django admin → Tracking → Conversions: one row, `external_id` = the bare
+   Apple transaction id, `is_test` **true** (a sandbox sale is real money to
+   nobody, and a true here is the field working, not a bug).
+3. Wait for Apple's own App Store Server Notification for that same purchase.
+   There must still be **one** conversion row. Two rows means the dedup broke,
+   and it is the failure that shows up as doubled ROAS rather than as an error.
+4. Refund it from App Store Connect. The refund books as a separate negative
+   conversion mirroring the original, and the two net to zero.
 
 ---
 
@@ -241,4 +264,7 @@ The suite reaches everything that does not need a device or a running
 `Roas.configure()`. It does **not** cover: that `ts` and the device context
 actually reach a beacon body (that needs a configured SDK and a fake transport),
 the ASA retry flow end to end, lifecycle/foreground transitions, or anything
-UIKit-backed. Stages 2 and 3 are how those get proven.
+UIKit-backed. `verifyPurchase` is covered only as far as the wire contract --
+`Roas.purchaseFields` is unit-tested for the field names, the `platform` choice
+value and what it refuses; that the beacon reaches Apple and books a conversion
+is Stage 5's sandbox purchase and nothing here. Stages 2 and 3 are how those get proven.

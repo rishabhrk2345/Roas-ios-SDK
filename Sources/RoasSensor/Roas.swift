@@ -314,6 +314,84 @@ public enum Roas {
         tx.send(path: "/api/tracking/mobile/events", body: body)
     }
 
+    /// Ask the collector to VERIFY a purchase against Apple's own records, the
+    /// moment StoreKit reports it.
+    ///
+    /// Revenue already reaches the backend without this, through App Store
+    /// Server Notifications — Apple's own server-to-server callback, which is
+    /// the source of truth and stays so. What that path cannot do is be
+    /// *prompt*: the notification is a separate delivery on Apple's schedule,
+    /// and until it lands the buyer is standing in the app having just paid
+    /// while the dashboard shows nothing. Android is worse (Play RTDN can take
+    /// minutes). This closes that gap without moving the trust boundary.
+    ///
+    /// It does not move it because the app only ever NAMES a receipt. The
+    /// collector holds the App Store Connect key, fetches Apple's own signed
+    /// copy of that transaction id and books whatever amount *Apple* reports —
+    /// so a tampered build can, at most, ask about a purchase that really
+    /// happened, for the price it really was. That is the whole reason this can
+    /// exist while `track(.subscribe, properties: ["price": 999999])` can never
+    /// be revenue: one is a claim, the other is a question put to the store.
+    ///
+    /// Booked under the same `external_id` the notification will carry, so the
+    /// two dedupe: whichever arrives first books the conversion and the other
+    /// is a no-op. Calling it for a purchase Apple has already notified us
+    /// about is therefore harmless, and so is calling it twice.
+    ///
+    /// Fire-and-forget, like `track`: it enqueues a signed beacon and returns.
+    /// The outcome arrives on `setOnDeliveryResult` under
+    /// `/api/tracking/mobile/purchase`, never as a thrown error or a value —
+    /// a purchase flow must not be made to wait on our network, and a customer
+    /// must never see a paid purchase fail because attribution was offline.
+    ///
+    /// Call it once the store has actually confirmed the purchase:
+    ///
+    /// ```swift
+    /// for await update in Transaction.updates {
+    ///     guard case .verified(let transaction) = update else { continue }
+    ///     Roas.verifyPurchase(transactionId: String(transaction.id))
+    ///     await transaction.finish()
+    /// }
+    /// ```
+    ///
+    /// - Parameter transactionId: StoreKit's `Transaction.id` as a string. Not
+    ///   `originalID` — that names the subscription's first purchase, so every
+    ///   renewal would be asked about (and deduped against) the sale from
+    ///   months ago instead of the one that just happened.
+    ///
+    /// - Note: Setting `appAccountToken()` on the purchase is still what ties
+    ///   the sale to this install. This reports the purchase sooner; it does
+    ///   not identify the buyer, and a purchase made without that token
+    ///   attributes no better for having been verified early.
+    public static func verifyPurchase(transactionId: String) {
+        guard let tx = transport else { return }
+        guard let fields = purchaseFields(transactionId: transactionId) else { return }
+        var body = baseBody()
+        body["os"] = "iOS"
+        for (key, value) in fields { body[key] = value }
+        tx.send(path: "/api/tracking/mobile/purchase", body: body)
+    }
+
+    /// The purchase-specific half of the beacon, split out from `verifyPurchase`
+    /// so the wire contract is testable without a configured SDK or a network.
+    /// Returns nil for a receipt the collector would refuse anyway.
+    ///
+    /// Rejecting here rather than sending is deliberate: `Transport`'s queue is
+    /// persisted and retried, and the collector answers a malformed body with a
+    /// 400 — which the queue treats as delivered and drops, so nothing would
+    /// surface except a beacon that quietly never books. Better to not send a
+    /// request that cannot succeed.
+    static func purchaseFields(transactionId: String) -> [String: Any]? {
+        let id = transactionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 64 is `MobilePurchaseSerializer.transaction_id`'s max_length. Apple's
+        // ids are ~16 digits, so anything near this is a caller sending the
+        // wrong thing (a receipt blob, a JWS) and would be refused server-side.
+        guard !id.isEmpty, id.count <= 64 else { return nil }
+        // `platform` picks which store the collector asks, and it is a
+        // ChoiceField: "ios" exactly, not "iOS" as the `os` field carries.
+        return ["platform": "ios", "transaction_id": id]
+    }
+
     /// Forward a deferred/universal link so its campaign context attributes
     /// this install deterministically — the iOS analogue of the Android
     /// install referrer. Forwards the FULL raw query string, not just

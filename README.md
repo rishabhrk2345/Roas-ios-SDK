@@ -41,13 +41,13 @@ Anything a device can claim, anyone can forge.
 Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/rishabhrk2345/Roas-ios-SDK", from: "0.1.7")
+.package(url: "https://github.com/rishabhrk2345/Roas-ios-SDK", from: "0.1.9")
 ```
 
 CocoaPods — this is **not** on the CocoaPods trunk, so name the source yourself:
 
 ```ruby
-pod 'RoasSensor', :git => 'https://github.com/rishabhrk2345/Roas-ios-SDK.git', :tag => '0.1.7'
+pod 'RoasSensor', :git => 'https://github.com/rishabhrk2345/Roas-ios-SDK.git', :tag => '0.1.9'
 ```
 
 > Both resolve against a **git tag**, so releasing means tagging the repo, not
@@ -85,6 +85,15 @@ Roas.track(.custom, name: "boss_defeated")
 // and the App Store Server Notification traces back to this install
 let purchaseToken = Roas.appAccountToken()
 
+// report a purchase the moment StoreKit confirms it, instead of waiting for
+// Apple's notification. Names a receipt; the collector asks Apple what it was
+// worth. Dedupes against the notification, so both paths together are safe.
+for await update in Transaction.updates {
+    guard case .verified(let transaction) = update else { continue }
+    Roas.verifyPurchase(transactionId: String(transaction.id))
+    await transaction.finish()
+}
+
 // forward universal links
 func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
     if let url = userActivity.webpageURL { Roas.handleDeepLink(url) }
@@ -94,7 +103,16 @@ func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
 Point App Store Server Notifications (**Version 2**, sandbox and production) at
 `https://<api>/api/tracking/webhooks/appstore/<public_key>`. Authenticity is
 Apple's own signature, so there is no secret to configure; the site's
-`bundle_id` must match the one inside the signed payload. RevenueCat users keep
+`bundle_id` must match the one inside the signed payload.
+
+That notification remains the source of truth for revenue. `verifyPurchase` is
+a latency fix, not a replacement: it books the same sale under the same
+`external_id`, so whichever arrives first wins and the other is a no-op. It is
+the only path that needs a **credential of ours** — an App Store Connect API
+key (key id, issuer id, `.p8`) saved on the site, because asking Apple a
+question requires proving who is asking, whereas verifying a notification needs
+no secret at all. With no key saved the endpoint answers 422 and books nothing;
+the notification still arrives as before. RevenueCat users keep
 `…/webhooks/revenuecat/<public_key>` and pass `visitorId()` as the `appUserID`
 instead.
 

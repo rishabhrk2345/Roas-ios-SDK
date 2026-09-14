@@ -94,7 +94,21 @@ enum DeviceContext {
     /// installs across two iPhones reported it; this is the column that
     /// separates the customer's own QA from real users, so a build that cannot
     /// tell the two apart needs its own number.
-    static let sdkVersion = "0.1.8"
+    ///
+    /// 0.1.9 adds `Roas.verifyPurchase(transactionId:)`, so a build carrying it
+    /// can report a purchase the moment StoreKit confirms one instead of
+    /// waiting on Apple's notification. It is new public API, which is exactly
+    /// what a version field has to be able to distinguish: the React Native
+    /// bridge pins a floor against this number to fail at resolve time rather
+    /// than as a missing-member compile error.
+    ///
+    /// Beware one collision that is NOT this: `com.roassensor:roas` 0.1.9 also
+    /// exists on Android, as a local mavenLocal-only rebuild that is a
+    /// regression of 0.1.6 and must not ship. The two numbers name different
+    /// artifacts in different ecosystems and always have since 0.1.7 — which is
+    /// why this field is documented as iOS's own sequence rather than a shared
+    /// one.
+    static let sdkVersion = "0.1.9"
 
     /// The hardware identifier — `iPhone14,5`, `iPad13,1`. The iOS analogue of
     /// Android's `Build.MODEL`: the key Apple's own device tables join on, and

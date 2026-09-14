@@ -115,6 +115,54 @@ final class BeaconContractTests: XCTestCase {
         XCTAssertEqual(RoasProps.source, "source")
     }
 
+    // MARK: - Purchase verification
+
+    func testPurchaseFieldsUseTheNamesTheCollectorParses() {
+        // `MobilePurchaseSerializer` declares `platform` and `transaction_id`.
+        // DRF ignores keys it does not declare, so a camelCase or misspelt name
+        // is not an error -- it arrives, is dropped, and the serializer refuses
+        // the beacon for a MISSING field instead.
+        guard let fields = Roas.purchaseFields(transactionId: "2000000912345678") else {
+            return XCTFail("a well-formed transaction id must produce fields")
+        }
+        XCTAssertEqual(fields["transaction_id"] as? String, "2000000912345678")
+        XCTAssertEqual(fields.count, 2, "an unexpected key would be silently dropped server-side")
+    }
+
+    func testPlatformIsTheLowercaseChoiceAndNotTheOsString() {
+        // `platform` is a ChoiceField of exactly ["ios", "android"], while the
+        // `os` field on every other beacon is "iOS". Sending the display casing
+        // here fails validation, and the 400 is dropped by the retry queue --
+        // so the failure is a purchase that quietly never books.
+        let fields = Roas.purchaseFields(transactionId: "1")
+        XCTAssertEqual(fields?["platform"] as? String, "ios")
+    }
+
+    func testABlankOrWhitespaceTransactionIdSendsNothing() {
+        // Nil means "do not enqueue". The collector would answer 400, which
+        // Transport treats as delivered and drops, so sending one costs a
+        // request and produces no diagnosis.
+        XCTAssertNil(Roas.purchaseFields(transactionId: ""))
+        XCTAssertNil(Roas.purchaseFields(transactionId: "   \n "))
+    }
+
+    func testATransactionIdIsTrimmedRatherThanRejected() {
+        // A copied-in id with a trailing newline is a real mistake and the
+        // surrounding whitespace is not part of the id, so it is recoverable.
+        XCTAssertEqual(
+            Roas.purchaseFields(transactionId: " 2000000912345678\n")?["transaction_id"] as? String,
+            "2000000912345678"
+        )
+    }
+
+    func testAnOverlongTransactionIdIsRefusedAtTheSameLimitTheServerUses() {
+        // 64 is the serializer's max_length. Apple's ids are ~16 digits, so a
+        // caller at this length is sending the wrong thing entirely -- a receipt
+        // blob or a JWS -- which the collector would refuse anyway.
+        XCTAssertNotNil(Roas.purchaseFields(transactionId: String(repeating: "9", count: 64)))
+        XCTAssertNil(Roas.purchaseFields(transactionId: String(repeating: "9", count: 65)))
+    }
+
     // MARK: - Location
 
     func testLocationIsAbsentOrCoarseButNeverPrecise() {
