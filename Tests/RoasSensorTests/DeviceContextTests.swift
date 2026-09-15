@@ -38,7 +38,7 @@ final class DeviceContextTests: XCTestCase {
         //
         // If this fails, bump all three together. Changing only the assertion
         // is how the triple drifts apart.
-        XCTAssertEqual(DeviceContext.sdkVersion, "0.1.9")
+        XCTAssertEqual(DeviceContext.sdkVersion, "0.1.10")
     }
 
     func testSnapshotOmitsEmptyValuesRatherThanSendingBlanks() {
@@ -141,15 +141,13 @@ final class DeviceContextTests: XCTestCase {
 
     // MARK: - volatileContext()
 
-    func testVolatileContextReportsUptimeWithinTheServersRange() {
-        // NOT `_index`, which clamps at 65535 (~18 hours) and would flatten
-        // every phone up longer than a day into one value -- destroying the one
-        // thing the field is for. `_uptime` allows the column's real ceiling.
-        guard let uptime = DeviceContext.volatileContext()["uptime_seconds"] as? Int else {
-            return XCTFail("uptime_seconds should always be readable")
-        }
-        XCTAssertGreaterThan(uptime, 0)
-        XCTAssertLessThanOrEqual(uptime, 2_147_483_647)
+    func testVolatileContextNeverReportsUptime() {
+        // `ProcessInfo.systemUptime` is a required-reason API whose every
+        // approved reason forbids sending the value off-device, and this field
+        // existed only to be sent off-device. So it is gone, and this pins it
+        // gone: re-adding it silently is a false privacy manifest, which App
+        // Review reads off the binary, not the plist.
+        XCTAssertNil(DeviceContext.volatileContext()["uptime_seconds"])
     }
 
     func testVolatileNetworkFieldsUseTheBackendVocabularyWhenPresent() {

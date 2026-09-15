@@ -52,7 +52,7 @@ public enum Roas {
     /// Two layers, for one reason: `deviceContext` is a launch-time snapshot of
     /// things that cannot change (model, screen, install dates) taken on the
     /// main thread because it reads UIKit, while `volatileContext()` re-reads
-    /// the things that do change (battery, network, uptime, location) at the
+    /// the things that do change (battery, network, location) at the
     /// moment the beacon is built. Freezing the second group at launch would
     /// report an hour-old battery level and the network the app started on,
     /// which for fields that exist to describe *this* moment is worse than
@@ -172,7 +172,17 @@ public enum Roas {
         registerLifecycle()
 
         tx.flush() // deliver anything queued from a previous offline launch
-        DeviceContext.registerForAdNetworkAttribution()
+        // Once, on the launch that reports the install -- NOT every launch. On
+        // iOS 16.1+ "registering" is `updatePostbackConversionValue(0)`, and
+        // under SKAdNetwork 4 a conversion value is allowed to DECREASE, so
+        // calling it on every cold start reset whatever the app had set:
+        // a purchase reported as 42 on Tuesday went back to 0 on Wednesday's
+        // launch, and if the postback window closed after that, the ad
+        // network was told the install never converted. The first launch is
+        // the only one where 0 is the truth.
+        if !store.installReported {
+            DeviceContext.registerForAdNetworkAttribution()
+        }
 
         let start = {
             if !store.installReported {

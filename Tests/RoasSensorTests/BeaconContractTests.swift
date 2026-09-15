@@ -163,6 +163,71 @@ final class BeaconContractTests: XCTestCase {
         XCTAssertNil(Roas.purchaseFields(transactionId: String(repeating: "9", count: 65)))
     }
 
+    // MARK: - Privacy manifest
+
+    /// The manifest as the package ships it, parsed. Skips (rather than fails)
+    /// under CocoaPods, where the file is a resource bundle and `Bundle.module`
+    /// does not exist -- the pod path is proven by a customer's upload, not here.
+    private func loadPrivacyManifest() throws -> [String: Any]? {
+        guard let url = DeviceContext.privacyManifestURL() else { return nil }
+        let data = try Data(contentsOf: url)
+        let plist = try PropertyListSerialization.propertyList(from: data, options: [], format: nil)
+        return plist as? [String: Any]
+    }
+
+    private func accessedAPICategories(_ manifest: [String: Any]) -> [String: [String]] {
+        let entries = manifest["NSPrivacyAccessedAPITypes"] as? [[String: Any]] ?? []
+        var out: [String: [String]] = [:]
+        for entry in entries {
+            guard let type = entry["NSPrivacyAccessedAPIType"] as? String else { continue }
+            out[type] = entry["NSPrivacyAccessedAPITypeReasons"] as? [String] ?? []
+        }
+        return out
+    }
+
+    func testPrivacyManifestShipsInsideThePackage() throws {
+        // ITMS-91053: App Store Connect refuses an upload whose binary calls a
+        // required-reason API that no manifest declares. The calls are ours
+        // (UserDefaults, file timestamps), so the manifest has to be ours too --
+        // and it has to be a resource the package actually carries, not a file
+        // that happens to sit in the source tree.
+        guard let manifest = try loadPrivacyManifest() else {
+            throw XCTSkip("Bundle.module is SwiftPM-only; the pod path ships a resource bundle")
+        }
+        XCTAssertEqual(manifest["NSPrivacyTracking"] as? Bool, true)
+        XCTAssertNotNil(manifest["NSPrivacyCollectedDataTypes"])
+    }
+
+    func testPrivacyManifestDeclaresExactlyTheRequiredReasonAPIsTheCodeCalls() throws {
+        guard let manifest = try loadPrivacyManifest() else {
+            throw XCTSkip("Bundle.module is SwiftPM-only")
+        }
+        let declared = accessedAPICategories(manifest)
+        // Storage.swift uses UserDefaults; Roas.swift and DeviceContext.swift
+        // read file creation dates inside the app container.
+        XCTAssertEqual(declared["NSPrivacyAccessedAPICategoryUserDefaults"], ["CA92.1"])
+        XCTAssertEqual(declared["NSPrivacyAccessedAPICategoryFileTimestamp"], ["C617.1"])
+        // System boot time is NOT declared because the code no longer calls it
+        // -- see testVolatileContextNeverReportsUptime. Declaring it would be
+        // the false statement; calling it undeclared would be the rejection.
+        XCTAssertNil(declared["NSPrivacyAccessedAPICategorySystemBootTime"])
+        XCTAssertNil(declared["NSPrivacyAccessedAPICategoryDiskSpace"])
+        XCTAssertNil(declared["NSPrivacyAccessedAPICategoryActiveKeyboards"])
+    }
+
+    func testPrivacyManifestListsNoTrackingDomains() throws {
+        // Deliberate, and the reason is in the manifest itself: a listed domain
+        // has every request to it dropped by iOS when ATT is denied, and our
+        // collector is one host per deployment carrying non-tracking beacons
+        // too. The IDFA is the only tracking datum and it is read only after
+        // ATT grants. If a dedicated tracking host is ever split out, this
+        // assertion is the one to change.
+        guard let manifest = try loadPrivacyManifest() else {
+            throw XCTSkip("Bundle.module is SwiftPM-only")
+        }
+        XCTAssertEqual((manifest["NSPrivacyTrackingDomains"] as? [String]) ?? [], [])
+    }
+
     // MARK: - Location
 
     func testLocationIsAbsentOrCoarseButNeverPrecise() {

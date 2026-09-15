@@ -15,7 +15,16 @@ let package = Package(
         .library(name: "RoasSensor", targets: ["RoasSensor"]),
     ],
     targets: [
-        .target(name: "RoasSensor"),
+        .target(
+            name: "RoasSensor",
+            // The privacy manifest travels INSIDE the package, because App Store
+            // Connect refuses an upload (ITMS-91053) whose binary calls a
+            // required-reason API -- UserDefaults, file timestamps -- that no
+            // manifest in the bundle declares, and those calls are this SDK's.
+            // `.copy`, not `.process`: Xcode must find the file byte-for-byte
+            // under its own name to merge it into the app's privacy report.
+            resources: [.copy("PrivacyInfo.xcprivacy")]
+        ),
         .testTarget(name: "RoasSensorTests", dependencies: ["RoasSensor"]),
     ]
 )

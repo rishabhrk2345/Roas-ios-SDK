@@ -41,24 +41,34 @@ Anything a device can claim, anyone can forge.
 Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/rishabhrk2345/Roas-ios-SDK", from: "0.1.9")
+.package(url: "https://github.com/rishabhrk2345/Roas-ios-SDK", from: "0.1.10")
 ```
 
 CocoaPods — this is **not** on the CocoaPods trunk, so name the source yourself:
 
 ```ruby
-pod 'RoasSensor', :git => 'https://github.com/rishabhrk2345/Roas-ios-SDK.git', :tag => '0.1.9'
+pod 'RoasSensor', :git => 'https://github.com/rishabhrk2345/Roas-ios-SDK.git', :tag => '0.1.10'
 ```
 
 > Both resolve against a **git tag**, so releasing means tagging the repo, not
 > just bumping `s.version`. A version with no matching tag fails at
 > `pod install` rather than quietly serving the previous code.
 
-**Verified on hardware.** `swift build` clean, 54 tests passing, and every
-device parameter confirmed on a physical iPhone 12 mini (iOS 16.7): install
-delivered, IDFA bound under an ATT grant, a real Apple Search Ads token resolved
-to a campaign, HMAC-signed beacons accepted. [`TESTING.md`](TESTING.md) is the
-runbook that got there, including what a Simulator can and cannot prove.
+**Verified on hardware.** Every release since 0.1.7 is built and tested on a
+Mac before it is tagged (`swift build`, `swift test`, and the iOS-slice
+`xcodebuild`), and every device parameter has been confirmed on physical
+iPhones (12 mini on iOS 16.7; 14 on iOS 27): install delivered, IDFA bound under
+an ATT grant, a real Apple Search Ads token resolved, HMAC-signed beacons
+accepted, and -- as of 0.1.9 -- `verifyPurchase` reaching the collector signed.
+[`TESTING.md`](TESTING.md) is the runbook, including what a Simulator can and
+cannot prove.
+
+**App Store submission.** The package ships a `PrivacyInfo.xcprivacy` (0.1.10+)
+declaring the required-reason APIs it calls and the data it collects. Without
+it, App Store Connect refuses the upload (ITMS-91053) for calls that are the
+SDK's, not the app's. The manifest declares tracking (the IDFA is read after
+ATT grants) and lists **no** tracking domains, on purpose -- see the comment in
+the file. The host app still needs its own `NSUserTrackingUsageDescription`.
 
 Requires iOS 14+. Add to `Info.plist` (for the ATT prompt):
 
@@ -135,7 +145,7 @@ Everything unattributed is reported honestly, never guessed. See
 ## Building & testing
 
 ```bash
-swift build && swift test    # 54 tests on the macOS host, no simulator needed
+swift build && swift test    # the macOS host, no simulator needed
 ```
 
 Open `Package.swift` in Xcode to develop against a device (ATT/IDFA/AdServices/

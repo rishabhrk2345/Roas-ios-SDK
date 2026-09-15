@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'RoasSensor'
-  s.version          = '0.1.9'
+  s.version          = '0.1.10'
   s.summary          = 'ROASSensor iOS tracking SDK — install attribution, funnel events, identity.'
   s.description      = <<-DESC
     Native iOS tracking for ROASSensor: install reporting (Apple Search Ads
@@ -27,6 +27,11 @@ Pod::Spec.new do |s|
   s.source           = { :git => 'https://github.com/rishabhrk2345/Roas-ios-SDK.git', :tag => s.version.to_s }
 
   s.source_files     = 'Sources/RoasSensor/**/*.swift'
+  # The privacy manifest, in a resource bundle so CocoaPods copies it into the
+  # app and Xcode merges it into the privacy report -- the same file SPM ships
+  # via `resources:` in Package.swift. Without it every customer upload is
+  # refused with ITMS-91053 for API calls that are ours.
+  s.resource_bundles = { 'RoasSensor' => ['Sources/RoasSensor/PrivacyInfo.xcprivacy'] }
   s.ios.deployment_target = '14.0'
   s.swift_version    = '5.9'
 end

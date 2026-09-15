@@ -1,10 +1,12 @@
 # Building and testing the iOS SDK on a Mac
 
-Nothing in this package has ever been compiled. It was written on Windows,
-where there is no Swift compiler, so **the first goal is not "does attribution
-work", it is "does this build at all"** -- and it should be treated as likely to
-fail the first time on small things (a renamed API, an availability annotation)
-that no amount of reading catches.
+The package is written on Windows, where there is no Swift compiler, and
+compiled on a Mac before every tag -- so **every change arrives here uncompiled**
+and the first goal of any release is still "does this build at all", not "does
+attribution work". Treat a fresh change as likely to fail on small things (a
+renamed API, an availability annotation) that no amount of reading catches;
+0.1.7 through 0.1.9 all built first time, which says the pattern works, not
+that it can be skipped.
 
 Work the stages in order. Each one is cheap and rules out a whole class of
 problem before the next one costs you a device install.
@@ -247,6 +249,23 @@ The site also needs its App Store Connect API key saved (key id, issuer id,
    conversion mirroring the original, and the two net to zero.
 
 ---
+
+### The privacy manifest (0.1.10+)
+
+The one thing no test here can prove is that App Store Connect accepts the
+upload. `swift test` proves the manifest is in the package and declares what
+the code calls; the real gate is an archive:
+
+1. Archive the sample app (or any host app) in Xcode → Organizer → the archive
+   → **Generate Privacy Report**. `RoasSensor` must appear with UserDefaults
+   (CA92.1) and File timestamp (C617.1) and nothing else. If it is missing
+   from the report, the resource did not ship -- `resources:` in
+   `Package.swift` for SPM, `resource_bundles` in the podspec for CocoaPods.
+2. Upload to TestFlight. An `ITMS-91053` email naming `RoasSensor` means an
+   undeclared required-reason API crept back in; grep the sources for
+   `systemUptime`, `volumeAvailableCapacity`, `activeInputModes` and
+   `mach_absolute_time` -- those are the ones this SDK has no honest reason
+   for.
 
 ## Known-risky spots, ranked
 

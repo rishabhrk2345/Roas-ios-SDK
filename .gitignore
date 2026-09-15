@@ -1,7 +1,13 @@
+# Travels with the tree to the Roas-ios-SDK publishing mirror (rsync --delete
+# keeps whatever is in this directory and nothing else), so it has to live HERE
+# rather than only in the monorepo root. Without it the 0.1.9 release briefly
+# pushed 1,977 compiled objects from `swift build` -- 53 MB every `pod install`
+# would have downloaded.
 .build/
 .swiftpm/
-DerivedData/
 *.xcodeproj
 *.xcworkspace
+xcuserdata/
+DerivedData/
 Package.resolved
 .DS_Store
