@@ -129,7 +129,7 @@ enum DeviceContext {
     /// longer collected (no approved reason lets system boot time leave the
     /// device), and SKAdNetwork registration runs once at install instead of
     /// resetting the conversion value to 0 on every launch.
-    static let sdkVersion = "0.1.10"
+    static let sdkVersion = "0.1.13"
 
     /// The hardware identifier — `iPhone14,5`, `iPad13,1`. The iOS analogue of
     /// Android's `Build.MODEL`: the key Apple's own device tables join on, and
