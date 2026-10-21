@@ -38,12 +38,23 @@ public enum Roas {
     private static var sessions: SessionTracker?
     private static var initialized = false
 
+    /// A `setConsent` made before `configure`, when there is no storage yet to
+    /// hold it. Applied before the first-open beacon is built, so a host that
+    /// reads its consent platform first never sends an install claiming consent
+    /// it was just told is withheld. Mirrors `pendingConsent` in `Roas.kt`.
+    private static var pendingConsent: Bool?
+
     /// The device fields stamped onto every touchpoint beacon, resolved once in
     /// `configure` and reused. `reportFirstOpen` runs on the transport's
     /// background queue while `UIScreen.main` and `UIDevice.current` are
     /// main-thread state, so the single UIKit read stays on the thread the app
     /// starts us from and every later beacon is just a dictionary copy.
     private static var deviceContext: [String: Any] = [:]
+    /// Guards `deviceContext`, which is read on whichever thread builds a beacon
+    /// and, since iOS 26, written a second time when the screen fields arrive
+    /// late (see `fillScreenWhenSceneActivates`). Its own lock, never held
+    /// while calling out, so it cannot deadlock with `lock`.
+    private static let contextLock = NSLock()
 
     /// Merge the device context into a beacon. Kept as a helper so the call
     /// sites that describe a device cannot drift apart the way iOS's
@@ -58,7 +69,10 @@ public enum Roas {
     /// which for fields that exist to describe *this* moment is worse than
     /// sending nothing.
     private static func describe(_ body: inout [String: Any]) {
-        for (key, value) in deviceContext { body[key] = value }
+        contextLock.lock()
+        let snapshot = deviceContext
+        contextLock.unlock()
+        for (key, value) in snapshot { body[key] = value }
         for (key, value) in DeviceContext.volatileContext() { body[key] = value }
     }
 
@@ -126,6 +140,30 @@ public enum Roas {
     ///     the IDFA can be read when the user allows it. Set false to present it
     ///     yourself at a better moment.
     ///   - baseUrl: override the collector host (defaults to production).
+    /// Relay the person's "Do Not Sell or Share" choice from your consent UI.
+    /// `false` = opted out. Persisted, so they answer once. Safe to call before
+    /// `configure` — and best called there, so the install records the choice.
+    ///
+    /// Mirrors `roas.consent()` on the web: every beacon carries the state,
+    /// `identify` sends nothing while it is withheld (an email hash is a durable
+    /// cross-device key), and the server never forwards an opted-out person's
+    /// purchases to Meta, Google or TikTok — that hand-off is "sharing" under
+    /// CCPA/CPRA. Installs and sessions still report, flagged, so your own
+    /// attribution keeps working. Independent of ATT: ATT governs the IDFA,
+    /// this governs what may be shared onward.
+    public static func setConsent(_ granted: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let store = storage { store.consent = granted } else { pendingConsent = granted }
+    }
+
+    /// The current choice: true unless `setConsent(false)` was called.
+    public static func hasConsent() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage?.consent ?? pendingConsent ?? true
+    }
+
     public static func configure(
         publicKey: String,
         customerUserId: String? = nil,
@@ -143,6 +181,8 @@ public enum Roas {
         self.publicKey = publicKey
         let store = Storage()
         resetIfDataWasResurrected(store)
+        if let pending = pendingConsent { store.consent = pending }
+        pendingConsent = nil
         let tx = Transport(baseUrl: baseUrl, storage: store, appSecret: appSecret)
         let tracker = SessionTracker(storage: store)
         storage = store
@@ -153,7 +193,13 @@ public enum Roas {
 
         // Before anything is dispatched to the transport queue, so the value is
         // published ahead of the first background read of it.
-        deviceContext = DeviceContext.snapshot()
+        let snapshot = DeviceContext.snapshot()
+        contextLock.lock()
+        deviceContext = snapshot
+        contextLock.unlock()
+        #if canImport(UIKit)
+        if snapshot["screen"] == nil { fillScreenWhenSceneActivates() }
+        #endif
         // The network path monitor has to be running before `currentPath` says
         // anything, and battery/location want the main thread — both started
         // here, ahead of the first beacon, for the same publish-before-read
@@ -171,6 +217,9 @@ public enum Roas {
         tracker.markForeground()
         registerLifecycle()
 
+        // After a delivery the server holds what the app just did, so that is
+        // when a rules-driven SKAdNetwork value can have moved.
+        tx.onFlushed = { refreshSkanValue() }
         tx.flush() // deliver anything queued from a previous offline launch
         // Once, on the launch that reports the install -- NOT every launch. On
         // iOS 16.1+ "registering" is `updatePostbackConversionValue(0)`, and
@@ -182,6 +231,8 @@ public enum Roas {
         // the only one where 0 is the truth.
         if !store.installReported {
             DeviceContext.registerForAdNetworkAttribution()
+            store.skanRegisteredAt = Date().timeIntervalSince1970
+            store.skanState = SkanWindowState()
         }
 
         let start = {
@@ -274,15 +325,143 @@ public enum Roas {
     ///     small campaigns that most need measuring.
     ///   - lockWindow: end the measurement window and post immediately. Only when
     ///     the value is genuinely final — it discards every later conversion.
+    ///   - allowDecrease: let this call LOWER the value already set in the
+    ///     current window. Off by default: SKAdNetwork 4 accepts a lower value,
+    ///     so an app reporting each event as it happens would otherwise overwrite
+    ///     a purchase with whatever the user did next (see `SkanValueGuard`).
+    ///     Turn it on only if your schema deliberately re-encodes.
     public static func updateConversionValue(
-        _ value: Int, coarse: String? = nil, lockWindow: Bool = false
+        _ value: Int, coarse: String? = nil, lockWindow: Bool = false, allowDecrease: Bool = false
     ) {
-        DeviceContext.updateConversionValue(value, coarse: coarse, lockWindow: lockWindow)
+        guard (0...63).contains(value) else {
+            if logLevel >= .error { print("[RoasSensor] updateConversionValue: \(value) is outside 0-63; ignored.") }
+            return
+        }
+        let rank = SkanValueGuard.coarseRank(coarse)
+        if coarse != nil && rank == nil && logLevel >= .error {
+            print("[RoasSensor] updateConversionValue: coarse must be low, medium or high; sending the fine value only.")
+        }
+        guard let store = storage else {
+            // Before configure there is no history to guard; pass it through.
+            let name = rank.flatMap { SkanValueGuard.coarseName($0) }
+            DeviceContext.updateConversionValue(value, coarse: name, lockWindow: lockWindow)
+            return
+        }
+        if store.skanRegisteredAt <= 0 {
+            // Registered by an SDK build that did not record when: the install
+            // anchor (the Documents directory's creation date) is the install time.
+            store.skanRegisteredAt = store.installAnchor > 0 ? store.installAnchor : Date().timeIntervalSince1970
+        }
+        guard let window = SkanValueGuard.window(elapsed: Date().timeIntervalSince1970 - store.skanRegisteredAt) else {
+            return // the last window has closed; no postback would carry it
+        }
+        let decision = SkanValueGuard.decide(
+            state: store.skanState, window: window, fine: value, coarse: rank,
+            lockWindow: lockWindow, allowDecrease: allowDecrease
+        )
+        guard decision.send else {
+            if logLevel >= .debug {
+                print("[RoasSensor] updateConversionValue: \(value) kept at \(decision.fine) (values only rise within a window).")
+            }
+            return
+        }
+        store.skanState = decision.state
+        // A plain `if let`, not `flatMap(SkanValueGuard.coarseName)`: a function
+        // reference handed to `flatMap` is a nonisolated context, which Xcode's
+        // stricter concurrency checking flags when the host app builds this
+        // package with main-actor default isolation.
+        var coarseName: String?
+        if let rank = decision.coarse { coarseName = SkanValueGuard.coarseName(rank) }
+        DeviceContext.updateConversionValue(decision.fine, coarse: coarseName, lockWindow: decision.lockWindow)
+    }
+
+    // MARK: Rules-driven SKAdNetwork values
+
+    private static let skanLock = NSLock()
+    private static var skanLastAsked: TimeInterval = 0
+    private static var skanAskQueued = false
+    private static var skanRulesOffUntil: TimeInterval = 0
+    /// The least time between two questions, so a burst of beacons is one request.
+    private static let skanAskInterval: TimeInterval = 15
+    /// An app whose schema sets nothing asks again only this often.
+    private static let skanRulesOffBackoff: TimeInterval = 6 * 3600
+
+    /// Ask the server which conversion value this device should hold, and set
+    /// it. The rules are the app's SKAdNetwork schema on the ROAS Sensor panel
+    /// (session / event / verified revenue → value), evaluated on the server
+    /// against what this device did in the current window, so the schema that
+    /// reads a postback is the same one that set it, and a revenue rule only
+    /// counts money a store or your server verified. The answer goes through
+    /// `updateConversionValue`'s guard, so a value still only rises within a
+    /// window. When the schema has no conditions the server says so and this
+    /// backs off: an app setting values in its own code is left alone.
+    ///
+    /// Called after beacons are delivered and when the app returns to the
+    /// foreground; there is nothing for a host app to call.
+    static func refreshSkanValue() {
+        #if os(iOS)
+        guard let tx = transport, let store = storage, store.consent, store.installReported else { return }
+        let now = Date().timeIntervalSince1970
+        skanLock.lock()
+        if now < skanRulesOffUntil {
+            skanLock.unlock()
+            return
+        }
+        let wait = skanLastAsked + skanAskInterval - now
+        if wait > 0 {
+            // Inside the interval: ask once more when it ends, rather than drop
+            // a purchase that landed a few seconds after an event.
+            let schedule = !skanAskQueued
+            skanAskQueued = true
+            skanLock.unlock()
+            if schedule {
+                DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
+                    skanLock.lock()
+                    skanAskQueued = false
+                    skanLock.unlock()
+                    refreshSkanValue()
+                }
+            }
+            return
+        }
+        skanLastAsked = now
+        skanLock.unlock()
+
+        if store.skanRegisteredAt <= 0 {
+            store.skanRegisteredAt = store.installAnchor > 0 ? store.installAnchor : now
+        }
+        guard let window = SkanValueGuard.window(elapsed: now - store.skanRegisteredAt) else { return }
+        let body: [String: Any] = ["site": publicKey, "vid": store.visitorId, "window": window]
+        tx.request(path: "/api/tracking/mobile/skan-value", body: body) { data in
+            guard let data = data else { return }
+            guard (data["rules"] as? Bool) == true else {
+                skanLock.lock()
+                skanRulesOffUntil = Date().timeIntervalSince1970 + skanRulesOffBackoff
+                skanLock.unlock()
+                return
+            }
+            let fine = data["fine"] as? Int
+            let coarse = data["coarse"] as? String
+            let lockWindow = (data["lockWindow"] as? Bool) ?? false
+            guard fine != nil || coarse != nil || lockWindow else { return }
+            if logLevel >= .debug {
+                print("[RoasSensor] SKAdNetwork rules: window \(window), fine \(fine.map { String($0) } ?? "-"), coarse \(coarse ?? "-"), lock \(lockWindow)")
+            }
+            DispatchQueue.main.async {
+                // Windows 2 and 3 carry no fine value: 0 leaves the guard's
+                // highest fine value where it is.
+                updateConversionValue(fine ?? 0, coarse: coarse, lockWindow: lockWindow)
+            }
+        }
+        #endif
     }
 
     /// Bind the user's identity. At least one argument must be non-nil.
     public static func identify(email: String? = nil, phone: String? = nil, customerUserId: String? = nil) {
         guard let tx = transport else { return }
+        // The one thing consent withholds on-device (as on the web): a durable
+        // identity key for someone who said "do not sell or share".
+        guard storage?.consent ?? true else { return }
         var body = baseBody()
         body["os"] = "iOS"
         let emailHash = Hashing.hashEmail(email)
@@ -438,6 +617,215 @@ public enum Roas {
         tx.send(path: "/api/tracking/mobile/first-open", body: body)
     }
 
+    /// Fetch the deferred deep link for this install, if one exists.
+    ///
+    /// Call this once on first open (after ``configure``) to check whether the
+    /// user arrived via a tracked ad link.  If they did, ``completion`` receives
+    /// a non-nil ``DeferredDeepLink`` containing the screen to open and the
+    /// campaign context; for an organic install it receives nil.
+    ///
+    /// The lookup is deterministic: it matches on the IDFA, so it is accurate on
+    /// every device where ATT consent was granted before or during install, and
+    /// also on any device where the IDFA is available from a previous session.
+    /// On a device whose user denied ATT the result will always be nil (no IDFA
+    /// to match on).
+    ///
+    /// ``completion`` is called on an arbitrary background thread.  Use
+    /// `DispatchQueue.main.async` to update the UI from it.
+    ///
+    /// ```swift
+    /// Roas.fetchDeferredDeepLink { link in
+    ///     guard let path = link?.deepLinkPath, !path.isEmpty else { return }
+    ///     DispatchQueue.main.async { openScreen(path) }
+    /// }
+    /// ```
+    public static func fetchDeferredDeepLink(_ completion: @escaping (DeferredDeepLink?) -> Void) {
+        guard let tx = transport, let store = storage else { completion(nil); return }
+        var body: [String: Any] = ["site": publicKey, "vid": store.visitorId]
+        if let idfa = DeviceContext.advertisingIdentifier() {
+            body["device_id"] = idfa
+        }
+        tx.request(path: "/api/tracking/mobile/deferred-deep-link", body: body) { data in
+            guard let data = data, (data["matched"] as? Bool) == true else {
+                completion(nil)
+                return
+            }
+            completion(DeferredDeepLink(
+                deepLinkPath: data["deepLinkPath"] as? String ?? "",
+                channel: data["channel"] as? String ?? "",
+                campaign: data["campaign"] as? String ?? "",
+                adName: data["adName"] as? String ?? "",
+                medium: data["medium"] as? String ?? ""
+            ))
+        }
+    }
+
+    /// Connect this install to the website tap that led to it, through the
+    /// clipboard: iOS web to app.
+    ///
+    /// The App Store passes nothing from a tap on a website to the app it
+    /// installs. So when an iPhone visitor taps a smart banner or one of your
+    /// hosted "Download the app" links, roas.js copies that link (with a
+    /// one-time code) to the clipboard. This reads it back and gives the install
+    /// that exact tap's source — the banner, or the Google / Meta ad that
+    /// brought the visitor to your website. Deterministic, like Android's
+    /// install referrer.
+    ///
+    /// **Opt-in, and you choose the moment.** On iOS 16 and later, reading the
+    /// clipboard shows the system "Allow Paste" prompt. This first checks — with
+    /// no prompt — whether the clipboard holds a web link at all, and only reads
+    /// it when it does, so most users never see a prompt. To avoid the prompt
+    /// entirely, use Apple's Paste button (`UIPasteControl`) and pass what it
+    /// pastes to ``handlePastedClick(_:completion:)`` instead.
+    ///
+    /// Call it once, early in the first session (after ``configure``). It asks
+    /// at most once per install: a found link, or a clipboard with none, settles
+    /// it; only a network failure leaves it to try again on a later launch.
+    /// ``completion`` runs on an arbitrary thread.
+    ///
+    /// ```swift
+    /// Roas.claimPastedClick { result in
+    ///     if result.matched { print("came from", result.channel) }
+    /// }
+    /// ```
+    public static func claimPastedClick(_ completion: ((PastedClickResult) -> Void)? = nil) {
+        guard transport != nil, let store = storage else {
+            completion?(.notMatched("unavailable"))
+            return
+        }
+        if store.pastedClickDone {
+            completion?(.notMatched("done"))
+            return
+        }
+        if PastedClick.tooLate(installAnchor: store.installAnchor, now: Date().timeIntervalSince1970) {
+            store.pastedClickDone = true
+            store.pastedClickCode = nil
+            completion?(.notMatched("too_late"))
+            return
+        }
+        // Already read on an earlier try: send it again, never re-read the
+        // clipboard (that would show the paste prompt a second time).
+        if let code = store.pastedClickCode {
+            submitPastedCode(code, attempt: 0, completion: completion)
+            return
+        }
+        #if os(iOS)
+        DispatchQueue.main.async {
+            let board = UIPasteboard.general
+            // Detection does not show the paste prompt; only reading does.
+            board.detectPatterns(for: [.probableWebURL]) { result in
+                let hasLink: Bool
+                switch result {
+                case .success(let found): hasLink = found.contains(.probableWebURL)
+                case .failure: hasLink = false
+                }
+                guard hasLink else {
+                    store.pastedClickDone = true
+                    completion?(.notMatched("no_link"))
+                    return
+                }
+                DispatchQueue.main.async {
+                    Roas.handlePastedClick(board.string ?? "", completion: completion)
+                }
+            }
+        }
+        #else
+        completion?(.notMatched("unavailable"))
+        #endif
+    }
+
+    /// The same as ``claimPastedClick(_:)``, for text you already have — what a
+    /// `UIPasteControl` (Apple's Paste button, which shows no prompt) pasted.
+    ///
+    /// ```swift
+    /// // in your paste target
+    /// override func paste(itemProviders: [NSItemProvider]) {
+    ///     itemProviders.first?.loadObject(ofClass: String.self) { text, _ in
+    ///         Roas.handlePastedClick(text ?? "")
+    ///     }
+    /// }
+    /// ```
+    public static func handlePastedClick(_ text: String, completion: ((PastedClickResult) -> Void)? = nil) {
+        guard transport != nil, let store = storage else {
+            completion?(.notMatched("unavailable"))
+            return
+        }
+        guard let code = PastedClick.code(in: text) else {
+            store.pastedClickDone = true
+            completion?(.notMatched("no_link"))
+            return
+        }
+        store.pastedClickCode = code
+        submitPastedCode(code, attempt: 0, completion: completion)
+    }
+
+    /// Hand a code to the server. Called right after `configure`, the install
+    /// beacon is often still in the queue and the server answers `no_install`;
+    /// that is retried a few seconds apart in this session, and the code stays
+    /// stored for the next launch after that — sent again without re-reading.
+    private static func submitPastedCode(_ code: String, attempt: Int, completion: ((PastedClickResult) -> Void)?) {
+        guard let tx = transport, let store = storage else {
+            completion?(.notMatched("unavailable"))
+            return
+        }
+        let body: [String: Any] = ["site": publicKey, "vid": store.visitorId, "code": code]
+        tx.request(path: "/api/tracking/mobile/paste-click", body: body) { data in
+            let matched = (data?["matched"] as? Bool) == true
+            let reason = data?["reason"] as? String
+            if !matched, reason == "no_install", attempt < PastedClick.inSessionRetries {
+                DispatchQueue.global().asyncAfter(deadline: .now() + PastedClick.retryDelay) {
+                    Roas.submitPastedCode(code, attempt: attempt + 1, completion: completion)
+                }
+                return
+            }
+            if PastedClick.isFinal(matched: matched, reason: data == nil ? nil : (reason ?? "")) {
+                store.pastedClickDone = true
+                store.pastedClickCode = nil
+            }
+            if matched {
+                completion?(PastedClickResult(
+                    matched: true,
+                    reason: "",
+                    channel: data?["channel"] as? String ?? "",
+                    campaign: data?["campaign"] as? String ?? ""
+                ))
+            } else {
+                completion?(.notMatched(data == nil ? "offline" : (reason ?? "")))
+            }
+        }
+    }
+
+    /// Register an APNs device token for uninstall detection.
+    ///
+    /// Call this from `application(_:didRegisterForRemoteNotificationsWithDeviceToken:)`:
+    ///
+    /// ```swift
+    /// func application(_ app: UIApplication,
+    ///                  didRegisterForRemoteNotificationsWithDeviceToken token: Data) {
+    ///     Roas.registerPushToken(token)
+    /// }
+    /// ```
+    ///
+    /// The token is stored server-side and probed daily via the APNs HTTP/2 API;
+    /// a `410 Gone` or `Unregistered` reason signals that the app was uninstalled.
+    ///
+    /// - Parameter token: The raw device token `Data` from UIApplicationDelegate.
+    public static func registerPushToken(_ token: Data) {
+        guard let tx = transport, let store = storage else { return }
+        let hexToken = token.map { String(format: "%02x", $0) }.joined()
+        guard !hexToken.isEmpty else { return }
+        var body: [String: Any] = [
+            "site": publicKey,
+            "vid": store.visitorId,
+            "platform": "apns",
+            "token": hexToken,
+        ]
+        if let idfa = DeviceContext.advertisingIdentifier() {
+            body["device_id"] = idfa
+        }
+        tx.request(path: "/api/tracking/mobile/push-token", body: body) { _ in }
+    }
+
     // MARK: - internals
 
     /// Send a late-arriving IDFA to `/identify`, which binds it as an
@@ -484,7 +872,7 @@ public enum Roas {
             // Omitted entirely on an ordinary device (see DeviceIntegrity).
             let integrity = DeviceIntegrity.signals()
             if !integrity.isEmpty { body["integrity_signals"] = integrity }
-            if let uid = customerUserId { body["external_id"] = uid }
+            if let uid = customerUserId, store.consent { body["external_id"] = uid }
             // The install IS session 1's opening touch, so it carries the
             // session's pv_id: the closing beacon then folds foreground time into
             // this row instead of writing an app_open next to it.
@@ -579,6 +967,10 @@ public enum Roas {
         // can — a device hours out of sync is a click-injection risk, and it is
         // the explanation for any `ts` the server had to reject.
         body["clock_offset_seconds"] = offset
+        // Read per beacon, not once: the person can change their mind mid-session
+        // and each row must record the state it was collected under. The
+        // server's CAPI push-back refuses an opted-out buyer.
+        body["consent"] = storage?.consent ?? true
         return body
     }
 
@@ -613,6 +1005,36 @@ public enum Roas {
     /// start and normally already is there; the hop exists so a host app that
     /// starts us from a background queue still gets correct values instead of a
     /// main-thread-checker complaint.
+    #if canImport(UIKit)
+    /// iOS 26 reads the screen from a window scene, and a host that configures
+    /// us before its first scene connects (Flutter, from `main()`) has none yet.
+    /// Rather than ship every beacon without screen, viewport and density, wait
+    /// for the first scene to activate and merge them in once.
+    private static func fillScreenWhenSceneActivates() {
+        let observer = ScreenFillToken()
+        observer.token = NotificationCenter.default.addObserver(
+            forName: UIScene.didActivateNotification, object: nil, queue: .main
+        ) { _ in
+            let fields = DeviceContext.screenFields()
+            guard !fields.isEmpty else { return }
+            contextLock.lock()
+            for (key, value) in fields where deviceContext[key] == nil { deviceContext[key] = value }
+            contextLock.unlock()
+            observer.remove()
+        }
+    }
+
+    /// The same main-queue-only token box as `DeviceContext`'s.
+    private final class ScreenFillToken: @unchecked Sendable {
+        var token: NSObjectProtocol?
+
+        func remove() {
+            if let token = token { NotificationCenter.default.removeObserver(token) }
+            token = nil
+        }
+    }
+    #endif
+
     private static func refreshVolatileOnMain() {
         if Thread.isMainThread {
             DeviceContext.refreshVolatile()
@@ -649,6 +1071,9 @@ public enum Roas {
 
     private static func onEnterForeground() {
         guard let tracker = sessions else { return }
+        // A purchase the store reported while the app was away (an App Store
+        // notification, a renewal) can have moved the value without any beacon.
+        refreshSkanValue()
         // Battery and location move while the app is away; this notification is
         // delivered on the main thread, which is where both want to be read.
         refreshVolatileOnMain()

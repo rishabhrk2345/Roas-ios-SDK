@@ -147,6 +147,45 @@ The only stage that can prove attribution.
    The install must arrive with `ts` set to when it *happened*: check
    `occurred_at`, not `created_at`. This is the fix worth the most; Android
    measured 48 hours of error here.
+6. **Pasted website click (0.1.14+)** -- iOS web to app by clipboard. See
+   "Pasted website click" below.
+
+### Pasted website click (0.1.14+)
+
+The App Store passes nothing from a website tap to the app, so roas.js 0.6.1
+copies the tapped link (with a one-time `rs_pb` code) to the clipboard on an
+iPhone, and `Roas.claimPastedClick()` reads it back. Only a physical iPhone can
+prove it: the simulator's clipboard and paste prompt do not behave like a device.
+
+You need a backend the iPhone can reach (the deployed one, or the local one
+through an https tunnel) with an iOS app (App Store id set) in a workspace.
+
+1. **Without a website first** -- isolates the SDK. Find the iOS app's banner or
+   install link slug in the panel, then in Safari on the iPhone open
+   `https://<api host>/api/tracking/c/<slug>?rs_pb=TESTpaste0123456789` (that
+   records the code), and copy that same URL (long-press the address bar →
+   Copy).
+2. Delete the test app if it is installed, then run it from Xcode (a fresh
+   install). It should call, after `configure`:
+   `Roas.claimPastedClick { r in print("PASTED", r.matched, r.reason, r.channel) }`
+3. Tap **Allow Paste** when iOS asks. Expect `PASTED true  smart_banner` (or the
+   link's channel). The panel's device inspector shows the install
+   "matched via clipboard".
+4. Run it again without deleting the app: expect `PASTED false done` and **no
+   paste prompt** -- it asks once per install.
+5. **Prompt declined** -- fresh install, tap Don't Allow: the app must carry on
+   normally and the install stays unattributed (or keeps its guess).
+6. **With the website** -- on a page with roas.js 0.6.1 and a smart banner for
+   this app, tap the banner in Safari, then do 2-3. Repeat after opening the
+   page with `?gclid=TEST123&gad_campaignid=777`: the install should take
+   channel `google`, campaign `777`.
+7. **Paste button** -- if the app uses `UIPasteControl`, hand its text to
+   `Roas.handlePastedClick(text)`: same result, no system prompt.
+
+Retries to know about: called right after `configure`, the first answer is
+often `no_install` (the install beacon is still queued). The SDK retries 3 times,
+5 s apart, in-session, and keeps the code for the next launch -- it never reads
+the clipboard twice.
 
 ---
 

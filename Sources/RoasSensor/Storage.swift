@@ -34,7 +34,12 @@ final class Storage {
     /// "never recorded" — treated as a fresh install too.
     private let installAnchorKey = "com.roassensor.sdk.install_anchor"
     private let asaPendingKey = "com.roassensor.sdk.asa_pending"
+    private let pastedClickDoneKey = "com.roassensor.sdk.pasted_click_done"
+    private let pastedClickCodeKey = "com.roassensor.sdk.pasted_click_code"
     private let asaAttemptsKey = "com.roassensor.sdk.asa_attempts"
+    private let consentKey = "com.roassensor.sdk.consent"
+    private let skanRegisteredAtKey = "com.roassensor.sdk.skan_registered_at"
+    private let skanStateKey = "com.roassensor.sdk.skan_state"
     private let maxQueue = 500
 
     init(defaults: UserDefaults = .standard) {
@@ -76,6 +81,22 @@ final class Storage {
         set { defaults.set(newValue, forKey: asaPendingKey) }
     }
 
+    /// The pasted web click has been settled for this install (claimed, or
+    /// found not to be there): `Roas.claimPastedClick` never asks again, so the
+    /// user never sees the paste prompt twice.
+    var pastedClickDone: Bool {
+        get { defaults.bool(forKey: pastedClickDoneKey) }
+        set { defaults.set(newValue, forKey: pastedClickDoneKey) }
+    }
+
+    /// A code already read off the clipboard but not yet accepted (the install
+    /// had not reached the server, or the network failed). Kept so a later try
+    /// sends it again WITHOUT reading the clipboard — one paste prompt, ever.
+    var pastedClickCode: String? {
+        get { defaults.string(forKey: pastedClickCodeKey) }
+        set { defaults.set(newValue, forKey: pastedClickCodeKey) }
+    }
+
     /// How many launches have already retried, so a device whose AdServices
     /// never answers stops paying for the attempt forever. Apple attributes an
     /// install for far longer than a handful of launches, so the bound costs no
@@ -83,6 +104,38 @@ final class Storage {
     var asaAttempts: Int {
         get { defaults.integer(forKey: asaAttemptsKey) }
         set { defaults.set(newValue, forKey: asaAttemptsKey) }
+    }
+
+    /// The person's sale/share choice, as last relayed by the host app's consent
+    /// UI (`Roas.setConsent`). Absent = granted, the web SDK's default, because
+    /// CCPA is an opt-out regime. Mirrors `Storage.consent` in `Storage.kt`, and
+    /// like it is never cleared on a detected reinstall: it is the person's
+    /// choice about this device, not state belonging to one install.
+    var consent: Bool {
+        get { defaults.object(forKey: consentKey) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: consentKey) }
+    }
+
+    // MARK: - SKAdNetwork (see SkanValueGuard)
+
+    /// When this install first registered with SKAdNetwork — the start of
+    /// Apple's conversion windows. 0 = never recorded.
+    var skanRegisteredAt: TimeInterval {
+        get { defaults.double(forKey: skanRegisteredAtKey) }
+        set { defaults.set(newValue, forKey: skanRegisteredAtKey) }
+    }
+
+    /// The highest values sent in the current window, as [window, fine, coarse, locked].
+    var skanState: SkanWindowState {
+        get {
+            guard let raw = defaults.array(forKey: skanStateKey) as? [Int], raw.count == 4 else {
+                return SkanWindowState()
+            }
+            return SkanWindowState(window: raw[0], fine: raw[1], coarse: raw[2], locked: raw[3] != 0)
+        }
+        set {
+            defaults.set([newValue.window, newValue.fine, newValue.coarse, newValue.locked ? 1 : 0], forKey: skanStateKey)
+        }
     }
 
     // MARK: - Session state (see SessionTracker)
@@ -168,6 +221,12 @@ final class Storage {
         // must not inherit a pending retry belonging to the install it replaced.
         defaults.removeObject(forKey: asaPendingKey)
         defaults.removeObject(forKey: asaAttemptsKey)
+        // A new install is a new chance to have arrived from a website tap.
+        defaults.removeObject(forKey: pastedClickDoneKey)
+        defaults.removeObject(forKey: pastedClickCodeKey)
+        // A new install registers again and starts Apple's windows over.
+        defaults.removeObject(forKey: skanRegisteredAtKey)
+        defaults.removeObject(forKey: skanStateKey)
         lock.unlock()
     }
 

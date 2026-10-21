@@ -41,13 +41,13 @@ Anything a device can claim, anyone can forge.
 Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/rishabhrk2345/Roas-ios-SDK", from: "0.1.10")
+.package(url: "https://github.com/rishabhrk2345/Roas-ios-SDK", from: "0.1.14")
 ```
 
 CocoaPods — this is **not** on the CocoaPods trunk, so name the source yourself:
 
 ```ruby
-pod 'RoasSensor', :git => 'https://github.com/rishabhrk2345/Roas-ios-SDK.git', :tag => '0.1.10'
+pod 'RoasSensor', :git => 'https://github.com/rishabhrk2345/Roas-ios-SDK.git', :tag => '0.1.14'
 ```
 
 > Both resolve against a **git tag**, so releasing means tagging the repo, not
@@ -76,12 +76,22 @@ Requires iOS 14+. Add to `Info.plist` (for the ATT prompt):
 NSUserTrackingUsageDescription = "Used to measure which ads brought you here."
 ```
 
+Without it iOS never shows the prompt (the SDK skips it rather than let iOS
+terminate the app), so no install carries an IDFA and a reinstall cannot be told
+from a new install. From 0.1.12 every beacon reports `att_status`, and the
+app's SDK tab names a build missing this key instead of reading it as every
+user declining.
+
 ## Usage
 
 ```swift
 import RoasSensor
 
-// App start
+// App start. If the person opted out of sale/sharing (CCPA "Do Not Sell or
+// Share"), say so BEFORE configure so the install records it. Persisted.
+// While withheld: beacons are flagged, identify() sends nothing, and their
+// purchases are never forwarded to Meta/Google/TikTok. Independent of ATT.
+Roas.setConsent(userAllowsSharing)
 Roas.configure(publicKey: "YOUR-SITE-PUBLIC-KEY")
 
 // user known
@@ -136,6 +146,7 @@ attribution. What this SDK gets you:
 | Apple Search Ads token | deterministic (ASA traffic only) |
 | IDFA (ATT-consented) | deterministic (only for users who tap "Allow", ~20–40%) |
 | Deferred deep link `rsclid` | deterministic (when a universal link carries it) |
+| Pasted website click (`claimPastedClick`, 0.1.14) | deterministic web to app: roas.js copies the tapped link with a one-time code, the app reads it back. Opt-in; iOS 16+ shows "Allow Paste" unless the app uses `UIPasteControl` |
 | SKAdNetwork | aggregate, campaign-level, delayed |
 | IDFV / device match | device-local |
 
@@ -155,5 +166,25 @@ StoreKit need a real device or simulator).
 
 - **ASA token resolution** — the SDK sends `asa_token` on first-open; a backend
   slice resolves it against Apple's API to campaign/keyword.
-- **SKAdNetwork postback ingestion** — `/api/tracking/skan/postback` (design doc
-  §6) decodes conversion values into the aggregate iOS report.
+- **SKAdNetwork postback ingestion** — shipped. Apple posts the developer's copy
+  to `https://<domain>/.well-known/skadnetwork/report-attribution/` (and
+  `/.well-known/appattribution/...` for AdAttributionKit), where `<domain>` is
+  the `NSAdvertisingAttributionReportEndpoint` / `AdAttributionKit ›
+  AttributionCopyEndpoint` value in the app's Info.plist — the marketing
+  site, which relays it to the backend. `/api/tracking/skan/postback` takes a
+  forwarded copy. The panel's per-app SKAdNetwork tab shows the exact values.
+
+`Roas.updateConversionValue` only ever raises the value within one of Apple's
+windows (days 0–2, 3–7, 8–35) unless the caller passes `allowDecrease: true`
+(`SkanValueGuard`): SKAdNetwork 4 accepts a lower value, so an app reporting each
+event as it happens would otherwise overwrite a purchase with the next event.
+
+**Rules-driven values (0.1.11+).** Give values a condition on the app's
+SKAdNetwork tab (a session, one of your events, or verified revenue in a range)
+and you need no `updateConversionValue` calls at all: after its beacons are
+delivered, and when the app returns to the foreground, the SDK asks
+`/api/tracking/mobile/skan-value` which value this device should hold in the
+current window and sets it through the same guard. Revenue conditions count
+only purchases a store, RevenueCat or your server verified. A schema without
+conditions answers `rules: false`, and an app that sets values in code keeps
+doing so.

@@ -38,7 +38,18 @@ final class DeviceContextTests: XCTestCase {
         //
         // If this fails, bump all three together. Changing only the assertion
         // is how the triple drifts apart.
-        XCTAssertEqual(DeviceContext.sdkVersion, "0.1.10")
+        XCTAssertEqual(DeviceContext.sdkVersion, "0.1.14")
+    }
+
+    func testAttStatusNamesTheMissingUsageDescriptionFirst() {
+        // A build without NSUserTrackingUsageDescription can never show the
+        // prompt, whatever the system status says; the panel's warning keys on
+        // exactly this string, so it must win over every answer.
+        XCTAssertEqual(DeviceContext.attStatusName(hasUsageDescription: false, rawStatus: 3), "no_usage_description")
+        XCTAssertEqual(DeviceContext.attStatusName(hasUsageDescription: true, rawStatus: 0), "not_determined")
+        XCTAssertEqual(DeviceContext.attStatusName(hasUsageDescription: true, rawStatus: 1), "restricted")
+        XCTAssertEqual(DeviceContext.attStatusName(hasUsageDescription: true, rawStatus: 2), "denied")
+        XCTAssertEqual(DeviceContext.attStatusName(hasUsageDescription: true, rawStatus: 3), "authorized")
     }
 
     func testSnapshotOmitsEmptyValuesRatherThanSendingBlanks() {

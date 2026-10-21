@@ -129,7 +129,24 @@ enum DeviceContext {
     /// longer collected (no approved reason lets system boot time leave the
     /// device), and SKAdNetwork registration runs once at install instead of
     /// resetting the conversion value to 0 on every launch.
-    static let sdkVersion = "0.1.13"
+    ///
+    /// 0.1.11 sets SKAdNetwork values from the panel's rules: after beacons go
+    /// out and on foreground it asks `/mobile/skan-value` and applies the
+    /// answer through the same rising-only guard (`Roas.refreshSkanValue`).
+    ///
+    /// 0.1.12 reports `att_status` on every beacon, including
+    /// `no_usage_description` for a build iOS can never show the prompt in,
+    /// so the panel can say "add the Info.plist key" instead of looking like
+    /// every user declined.
+    ///
+    /// 0.1.13 adds `Roas.fetchDeferredDeepLink(_:)` (post-install deep-link
+    /// recovery by advertising ID) and `Roas.registerPushToken(_:)` (APNs
+    /// device token registration for uninstall detection).
+    ///
+    /// 0.1.14 adds `Roas.claimPastedClick(_:)` / `Roas.handlePastedClick(_:completion:)`:
+    /// iOS web to app by clipboard, the website tap's click code read back on
+    /// first open (opt-in; iOS 16+ asks the user unless `UIPasteControl` is used).
+    static let sdkVersion = "0.1.14"
 
     /// The hardware identifier — `iPhone14,5`, `iPad13,1`. The iOS analogue of
     /// Android's `Build.MODEL`: the key Apple's own device tables join on, and
@@ -168,12 +185,44 @@ enum DeviceContext {
     /// it exists to support.
     static func screen() -> String {
         #if canImport(UIKit)
-        let bounds = UIScreen.main.nativeBounds
+        guard let bounds = currentScreen()?.nativeBounds else { return "" }
         return "\(Int(bounds.width))x\(Int(bounds.height))"
         #else
         return ""
         #endif
     }
+
+    #if canImport(UIKit)
+    /// The screen the app is shown on. iOS 26 deprecates `UIScreen.main` in
+    /// favour of the screen a window scene reports, so that is read first; an
+    /// older iOS keeps `UIScreen.main`, where it is not deprecated.
+    ///
+    /// Early in a launch (a Flutter app configuring before its first frame) no
+    /// scene is connected yet, so on iOS 26 this can be nil. The three screen
+    /// fields are then left out of the snapshot and `Roas` fills them in when
+    /// the first scene activates (`fillScreenWhenSceneActivates`), rather than
+    /// sending a blank or guessing. Main-thread state, like the rest of the
+    /// snapshot.
+    static func currentScreen() -> UIScreen? {
+        if #available(iOS 26.0, *) {
+            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            return (scenes.first { $0.activationState == .foregroundActive } ?? scenes.first)?.screen
+        }
+        return UIScreen.main
+    }
+
+    /// Just the screen fields, for the late fill above. Empty when there is
+    /// still no screen to read.
+    static func screenFields() -> [String: Any] {
+        var fields: [String: Any] = [:]
+        let pixels = screen()
+        if !pixels.isEmpty { fields["screen"] = pixels }
+        let points = viewport()
+        if !points.isEmpty { fields["viewport"] = points }
+        if let density = screenDensity() { fields["screen_density"] = density }
+        return fields
+    }
+    #endif
 
     /// BCP-47 (`en-IN`), the same shape Android's `Locale.toLanguageTag()` sends.
     /// The two must agree: one dashboard groups both.
@@ -227,6 +276,12 @@ enum DeviceContext {
         if Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision") != nil {
             return "development"
         }
+        // `appStoreReceiptURL` is deprecated in iOS 18 in favour of
+        // `AppTransaction.shared.environment`, which is async. This value rides
+        // the install beacon on the very first launch, so an async answer would
+        // arrive after the beacon it exists to label. Kept deliberately, and
+        // the one remaining deprecation warning in this SDK; its *name* is still
+        // environment-derived and available immediately.
         guard let receipt = Bundle.main.appStoreReceiptURL else { return "" }
         return receipt.lastPathComponent == "sandboxReceipt" ? "testflight" : "app_store"
         #endif
@@ -241,7 +296,7 @@ enum DeviceContext {
     /// `viewport` carries, so one column holds both.
     static func viewport() -> String {
         #if canImport(UIKit)
-        let bounds = UIScreen.main.bounds
+        guard let bounds = currentScreen()?.bounds else { return "" }
         let width = Int(bounds.width)
         let height = Int(bounds.height)
         return width > 0 && height > 0 ? "\(width)x\(height)" : ""
@@ -256,7 +311,8 @@ enum DeviceContext {
     /// systems scale from (iOS `scale` 1 == Android `mdpi` == 160dpi).
     static func screenDensity() -> Int? {
         #if canImport(UIKit)
-        let dpi = Int((UIScreen.main.scale * 160).rounded())
+        guard let scale = currentScreen()?.scale else { return nil }
+        let dpi = Int((scale * 160).rounded())
         return dpi > 0 ? dpi : nil
         #else
         return nil
@@ -451,12 +507,41 @@ enum DeviceContext {
         volatileLock.unlock()
     }
 
+    /// Whether the host app's Info.plist carries the tracking prompt's text.
+    /// Without it iOS terminates the app on the prompt, so the SDK never shows
+    /// it, and no device on that build can ever grant the IDFA.
+    static func hasTrackingUsageDescription() -> Bool {
+        Bundle.main.object(forInfoDictionaryKey: "NSUserTrackingUsageDescription") != nil
+    }
+
+    /// The `att_status` beacon value: the build's ability to ask first, then
+    /// the answer. `rawStatus` is `ATTrackingManager.AuthorizationStatus`'s raw
+    /// value (0 not determined, 1 restricted, 2 denied, 3 authorized), taken
+    /// raw so the mapping is testable on a Mac, where the prompt never runs.
+    static func attStatusName(hasUsageDescription: Bool, rawStatus: UInt) -> String {
+        guard hasUsageDescription else { return "no_usage_description" }
+        switch rawStatus {
+        case 3: return "authorized"
+        case 2: return "denied"
+        case 1: return "restricted"
+        default: return "not_determined"
+        }
+    }
+
     /// The fields that change over a process lifetime, merged onto each
     /// touchpoint beacon. Safe to call from any thread.
     static func volatileContext() -> [String: Any] {
         volatileLock.lock()
         var context = mainThreadContext
         volatileLock.unlock()
+        #if os(iOS)
+        // Volatile, not snapshot: the user can switch tracking on or off in
+        // Settings at any time, and no callback says so.
+        context["att_status"] = attStatusName(
+            hasUsageDescription: hasTrackingUsageDescription(),
+            rawStatus: ATTrackingManager.trackingAuthorizationStatus.rawValue
+        )
+        #endif
         #if canImport(Network)
         if let path = pathMonitor?.currentPath {
             let transport: String
@@ -591,9 +676,7 @@ enum DeviceContext {
     /// respected: no consent, no id.
     static func advertisingIdentifier() -> String? {
         #if os(iOS)
-        if #available(iOS 14, *) {
-            guard ATTrackingManager.trackingAuthorizationStatus == .authorized else { return nil }
-        }
+        guard ATTrackingManager.trackingAuthorizationStatus == .authorized else { return nil }
         let idfa = ASIdentifierManager.shared().advertisingIdentifier.uuidString
         return idfa == "00000000-0000-0000-0000-000000000000" ? nil : idfa
         #else
@@ -606,39 +689,37 @@ enum DeviceContext {
     /// IDFA is available on first-open when the user allowed it.
     static func requestTracking(_ completion: @escaping () -> Void) {
         #if os(iOS)
-        if #available(iOS 14, *) {
-            // iOS TERMINATES the host app — not an error, a hard crash — if this
-            // is called without NSUserTrackingUsageDescription in Info.plist. The
-            // caller runs reportFirstOpen *inside* this completion, so that crash
-            // costs the install beacon too: the customer gets an app that dies on
-            // launch AND no attribution, with nothing connecting the two.
-            //
-            // Found exactly that way. A `flutter create` iOS folder ships without
-            // the key, so the first real-device Flutter run died silently — a
-            // healthy backend and a correct URL, and zero rows.
-            //
-            // Skipping the prompt loses the IDFA, which is a real cost; crashing
-            // loses the IDFA, the install, and the app. Degrade, never take down
-            // the install report — the same rule DeviceInfo states on Android.
-            guard Bundle.main.object(forInfoDictionaryKey: "NSUserTrackingUsageDescription") != nil else {
-                if Roas.logLevel >= .error {
-                    // One literal, no `+`: os_log takes a StaticString, and
-                    // concatenation produces a String — which is a compile error,
-                    // not a warning.
-                    os_log(
-                        "ATT skipped: no NSUserTrackingUsageDescription in Info.plist. Add it to prompt for tracking; until then there is no IDFA.",
-                        log: attLog,
-                        type: .error
-                    )
-                }
-                completion()
-                return
+        // iOS TERMINATES the host app — not an error, a hard crash — if this
+        // is called without NSUserTrackingUsageDescription in Info.plist. The
+        // caller runs reportFirstOpen *inside* this completion, so that crash
+        // costs the install beacon too: the customer gets an app that dies on
+        // launch AND no attribution, with nothing connecting the two.
+        //
+        // Found exactly that way. A `flutter create` iOS folder ships without
+        // the key, so the first real-device Flutter run died silently — a
+        // healthy backend and a correct URL, and zero rows.
+        //
+        // Skipping the prompt loses the IDFA, which is a real cost; crashing
+        // loses the IDFA, the install, and the app. Degrade, never take down
+        // the install report — the same rule DeviceInfo states on Android.
+        guard hasTrackingUsageDescription() else {
+            if Roas.logLevel >= .error {
+                // One literal, no `+`: os_log takes a StaticString, and
+                // concatenation produces a String — which is a compile error,
+                // not a warning.
+                os_log(
+                    "ATT skipped: no NSUserTrackingUsageDescription in Info.plist. Add it to prompt for tracking; until then there is no IDFA.",
+                    log: attLog,
+                    type: .error
+                )
             }
-            promptWhenActive(completion)
+            completion()
             return
         }
-        #endif
+        promptWhenActive(completion)
+        #else
         completion()
+        #endif
     }
 
     #if os(iOS)
@@ -647,6 +728,18 @@ enum DeviceContext {
     /// skipped prompt, while the cost of being too long is a delayed install
     /// report on an app that was never going to foreground anyway.
     private static let activeWaitSeconds: TimeInterval = 10
+
+    /// A NotificationCenter observer token that the observer's own block can
+    /// remove. `@unchecked Sendable` because it is only touched on the main
+    /// queue (the observer runs on `.main`, the timeout on `DispatchQueue.main`).
+    private final class ObserverToken: @unchecked Sendable {
+        var token: NSObjectProtocol?
+
+        func remove() {
+            if let token = token { NotificationCenter.default.removeObserver(token) }
+            token = nil
+        }
+    }
 
     /// One-shot guard: `completion` must run exactly once, whichever of the
     /// paths below reaches it first. It is not optional — `Roas.configure` runs
@@ -689,7 +782,6 @@ enum DeviceContext {
     ///
     /// So: ask now if we are active, otherwise wait for `didBecomeActive` — the
     /// real signal rather than a guess at how long it takes to arrive.
-    @available(iOS 14, *)
     private static func promptWhenActive(_ completion: @escaping () -> Void) {
         let state = PromptState(completion)
 
@@ -703,11 +795,14 @@ enum DeviceContext {
                 prompt()
                 return
             }
-            var observer: NSObjectProtocol?
-            observer = NotificationCenter.default.addObserver(
+            // A box, not a captured `var`: the token only exists after
+            // `addObserver` returns, and the observer's own block (a Sendable
+            // closure) must be able to remove it. Only ever touched on main.
+            let observer = ObserverToken()
+            observer.token = NotificationCenter.default.addObserver(
                 forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
             ) { _ in
-                if let observer = observer { NotificationCenter.default.removeObserver(observer) }
+                observer.remove()
                 prompt()
             }
             // The install report cannot wait forever on an app that never
@@ -716,7 +811,7 @@ enum DeviceContext {
             // the user is mid-answer; `identify()` re-reads the IDFA afterwards
             // either way.
             DispatchQueue.main.asyncAfter(deadline: .now() + activeWaitSeconds) {
-                if let observer = observer { NotificationCenter.default.removeObserver(observer) }
+                observer.remove()
                 if !state.promptShown { state.finish() }
             }
         }
@@ -796,7 +891,7 @@ enum DeviceContext {
         #if os(iOS)
         if #available(iOS 16.1, *) {
             SKAdNetwork.updatePostbackConversionValue(0) { _ in }
-        } else if #available(iOS 11.3, *) {
+        } else {
             SKAdNetwork.registerAppForAdNetworkAttribution()
         }
         #endif
@@ -826,7 +921,7 @@ enum DeviceContext {
             } else {
                 SKAdNetwork.updatePostbackConversionValue(value) { _ in }
             }
-        } else if #available(iOS 14, *) {
+        } else {
             // Pre-16.1 has no coarse concept at all; the fine value is the whole
             // channel, so a caller sending only coarse would silently do nothing.
             SKAdNetwork.updateConversionValue(value)

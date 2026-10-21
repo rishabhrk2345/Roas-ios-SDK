@@ -75,6 +75,20 @@ final class StorageTests: XCTestCase {
         XCTAssertEqual(storage.clockOffsetSeconds, 42)
     }
 
+    // MARK: - Consent (CCPA "Do Not Sell or Share")
+
+    func testConsentDefaultsToGranted() {
+        XCTAssertTrue(makeStorage().consent)
+    }
+
+    func testConsentOptOutRoundTripsAndSurvivesReinstallReset() {
+        // The person's choice about this device, not one install's state.
+        let storage = makeStorage()
+        storage.consent = false
+        storage.resetForNewInstall()
+        XCTAssertFalse(storage.consent)
+    }
+
     // MARK: - Apple Search Ads retry state
 
     func testAsaRetryStateDefaultsToNothingOwed() {

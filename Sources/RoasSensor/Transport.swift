@@ -18,6 +18,11 @@ final class Transport {
     /// the public site key. Nil until an app adopts signing.
     private let appSecret: String?
     private static let log = OSLog(subsystem: "com.roassensor.sdk", category: "Transport")
+    /// Called on the transport queue after a flush delivered at least one
+    /// beacon: the server now holds what the app just did, which is when it is
+    /// worth asking for a SKAdNetwork value (`Roas.refreshSkanValue`). Set once
+    /// in `configure`, before the first flush.
+    var onFlushed: (() -> Void)?
 
     /// Below this, the difference is network latency, not a wrong clock.
     private static let clockSkewThresholdSeconds: Int64 = 30
@@ -69,7 +74,40 @@ final class Transport {
             // holds AT REMOVAL TIME, not an overwrite computed from the
             // `pending` snapshot read above — see Storage.removeDelivered.
             self.storage.removeDelivered(delivered)
+            if !delivered.isEmpty { self.onFlushed?() }
         }
+    }
+
+    /// One signed request whose answer the caller reads, outside the queue.
+    /// For questions ("what should my conversion value be?"), never for
+    /// beacons: a beacon must survive being offline, an answer is only worth
+    /// having now, and the caller simply asks again later. `completion` gets
+    /// the response's `data` object, or nil on any failure.
+    func request(path: String, body: [String: Any], completion: @escaping ([String: Any]?) -> Void) {
+        guard let url = URL(string: base + path), let bodyData = try? JSONSerialization.data(withJSONObject: body) else {
+            completion(nil)
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = bodyData
+        request.timeoutInterval = 15
+        let now = Int64(Date().timeIntervalSince1970) + storage.clockOffsetSeconds
+        if let signature = Signer.header(secret: appSecret, body: bodyData, epochSeconds: now) {
+            request.setValue(signature, forHTTPHeaderField: Signer.headerName)
+        }
+        session.dataTask(with: request) { data, response, error in
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard
+                error == nil, (200..<300).contains(code), let data = data,
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                completion(nil)
+                return
+            }
+            completion(json["data"] as? [String: Any])
+        }.resume()
     }
 
     private func post(

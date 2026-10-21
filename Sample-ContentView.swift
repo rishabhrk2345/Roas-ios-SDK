@@ -60,9 +60,25 @@ struct ContentView: View {
                 Roas.requestTrackingAuthorization()
                 append("ATT requested")
             }
-            Button("SKAN conversion value 3") {
+            // Tap these in order to see the SDK's guard: within one SKAdNetwork
+            // window a value only rises, so "10" after "63" is kept at 63 and
+            // never reaches Apple (Console.app, process adattributiond, shows
+            // which updates were made). The last one lowers on purpose.
+            Button("SKAN conversion value 3 (low)") {
                 Roas.updateConversionValue(3, coarse: "low")
                 append("SKAN fine=3 coarse=low")
+            }
+            Button("SKAN conversion value 63 (high): purchase") {
+                Roas.updateConversionValue(63, coarse: "high")
+                append("SKAN fine=63 coarse=high")
+            }
+            Button("SKAN conversion value 10 (medium): kept at 63") {
+                Roas.updateConversionValue(10, coarse: "medium")
+                append("SKAN fine=10 asked; the guard keeps 63")
+            }
+            Button("SKAN value 10, allowDecrease: lowers it") {
+                Roas.updateConversionValue(10, coarse: "medium", allowDecrease: true)
+                append("SKAN fine=10 coarse=medium (allowDecrease)")
             }
             Button("Show ids") {
                 append("vid = \(Roas.visitorId() ?? "-")")
