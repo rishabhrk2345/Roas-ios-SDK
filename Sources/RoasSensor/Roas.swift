@@ -174,7 +174,7 @@ public enum Roas {
         appSecret: String? = nil,
         // A public function's default-argument expression can't reference a
         // private member, so the production host is inlined here as a literal.
-        baseUrl: String = "https://api.roassensor.com"
+        baseUrl: String = "https://core.roassensor.com"
     ) {
         lock.lock()
         if initialized { lock.unlock(); return }
@@ -499,7 +499,13 @@ public enum Roas {
         body["os"] = "iOS"
         body["name"] = event.rawValue
         if let name = name { body["label"] = name }
-        if let props = properties { body["props"] = props }
+        if let props = properties {
+            // Cleaned before it goes near JSONSerialization: one Date, URL or
+            // NaN in here used to raise an Objective-C exception that `try?`
+            // cannot catch, crashing the host app on a tracking call (JSONSafe).
+            let clean = JSONSafe.object(props)
+            if JSONSerialization.isValidJSONObject(clean) { body["props"] = clean }
+        }
         tx.send(path: "/api/tracking/mobile/events", body: body)
     }
 

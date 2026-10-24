@@ -43,6 +43,17 @@ final class Transport {
     func background(_ block: @escaping () -> Void) { queue.async(execute: block) }
 
     func send(path: String, body: [String: Any]) {
+        // `try?` does not protect `data(withJSONObject:)`: an invalid value
+        // (a Date, NaN) raises an Objective-C exception, which crashes the app
+        // rather than throwing. `track` cleans what the host app passes in
+        // (JSONSafe); this is the backstop for every other body, and a beacon
+        // that cannot be written is dropped, never allowed to crash.
+        guard JSONSerialization.isValidJSONObject(body) else {
+            if Roas.logLevel >= .error {
+                os_log("%{public}@ -> dropped: not valid JSON", log: Transport.log, type: .error, path)
+            }
+            return
+        }
         guard
             let bodyData = try? JSONSerialization.data(withJSONObject: body),
             let bodyStr = String(data: bodyData, encoding: .utf8),
@@ -84,7 +95,11 @@ final class Transport {
     /// having now, and the caller simply asks again later. `completion` gets
     /// the response's `data` object, or nil on any failure.
     func request(path: String, body: [String: Any], completion: @escaping ([String: Any]?) -> Void) {
-        guard let url = URL(string: base + path), let bodyData = try? JSONSerialization.data(withJSONObject: body) else {
+        guard
+            JSONSerialization.isValidJSONObject(body), // see send(): try? cannot catch the exception
+            let url = URL(string: base + path),
+            let bodyData = try? JSONSerialization.data(withJSONObject: body)
+        else {
             completion(nil)
             return
         }

@@ -146,7 +146,11 @@ enum DeviceContext {
     /// 0.1.14 adds `Roas.claimPastedClick(_:)` / `Roas.handlePastedClick(_:completion:)`:
     /// iOS web to app by clipboard, the website tap's click code read back on
     /// first open (opt-in; iOS 16+ asks the user unless `UIPasteControl` is used).
-    static let sdkVersion = "0.1.14"
+    ///
+    /// 0.1.15 defaults to https://core.roassensor.com (api.roassensor.com has no
+    /// DNS) and sanitises `track(properties:)`, which crashed the host app on a
+    /// Date, URL or NaN.
+    static let sdkVersion = "0.1.15"
 
     /// The hardware identifier — `iPhone14,5`, `iPad13,1`. The iOS analogue of
     /// Android's `Build.MODEL`: the key Apple's own device tables join on, and

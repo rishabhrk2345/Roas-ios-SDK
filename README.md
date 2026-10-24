@@ -41,13 +41,13 @@ Anything a device can claim, anyone can forge.
 Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/rishabhrk2345/Roas-ios-SDK", from: "0.1.14")
+.package(url: "https://github.com/rishabhrk2345/Roas-ios-SDK", from: "0.1.15")
 ```
 
 CocoaPods — this is **not** on the CocoaPods trunk, so name the source yourself:
 
 ```ruby
-pod 'RoasSensor', :git => 'https://github.com/rishabhrk2345/Roas-ios-SDK.git', :tag => '0.1.14'
+pod 'RoasSensor', :git => 'https://github.com/rishabhrk2345/Roas-ios-SDK.git', :tag => '0.1.15'
 ```
 
 > Both resolve against a **git tag**, so releasing means tagging the repo, not
