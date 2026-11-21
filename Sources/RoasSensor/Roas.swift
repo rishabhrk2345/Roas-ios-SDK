@@ -140,6 +140,13 @@ public enum Roas {
     ///     the IDFA can be read when the user allows it. Set false to present it
     ///     yourself at a better moment.
     ///   - baseUrl: override the collector host (defaults to production).
+    ///   - observePurchases: watch the App Store for this person's purchases and
+    ///     ask ROAS Sensor to verify each one, so the app never has to call
+    ///     `verifyPurchase` itself (iOS 15+; ignored below that). Only the
+    ///     transaction id is sent; the amount always comes from Apple. Needs the
+    ///     App Store In-App Purchase key selected on the app's Revenue tab, or the
+    ///     server refuses each one. Off by default so an app upgrading the SDK does
+    ///     not start sending purchase questions it has not set up a key for.
     /// Relay the person's "Do Not Sell or Share" choice from your consent UI.
     /// `false` = opted out. Persisted, so they answer once. Safe to call before
     /// `configure` — and best called there, so the install records the choice.
@@ -174,7 +181,8 @@ public enum Roas {
         appSecret: String? = nil,
         // A public function's default-argument expression can't reference a
         // private member, so the production host is inlined here as a literal.
-        baseUrl: String = "https://core.roassensor.com"
+        baseUrl: String = "https://core.roassensor.com",
+        observePurchases: Bool = false
     ) {
         lock.lock()
         if initialized { lock.unlock(); return }
@@ -221,6 +229,13 @@ public enum Roas {
         // when a rules-driven SKAdNetwork value can have moved.
         tx.onFlushed = { refreshSkanValue() }
         tx.flush() // deliver anything queued from a previous offline launch
+        #if canImport(StoreKit)
+        if observePurchases, #available(iOS 15.0, macOS 12.0, *) {
+            PurchaseObserver.start(storage: store) { transactionId in
+                verifyPurchase(transactionId: transactionId)
+            }
+        }
+        #endif
         // Once, on the launch that reports the install -- NOT every launch. On
         // iOS 16.1+ "registering" is `updatePostbackConversionValue(0)`, and
         // under SKAdNetwork 4 a conversion value is allowed to DECREASE, so
@@ -554,10 +569,11 @@ public enum Roas {
     ///   renewal would be asked about (and deduped against) the sale from
     ///   months ago instead of the one that just happened.
     ///
-    /// - Note: Setting `appAccountToken()` on the purchase is still what ties
-    ///   the sale to this install. This reports the purchase sooner; it does
-    ///   not identify the buyer, and a purchase made without that token
-    ///   attributes no better for having been verified early.
+    /// - Note: The request carries this install's visitor id, and the server uses
+    ///   it to attribute the sale when Apple's own record names no buyer (no
+    ///   `appAccountToken`, which an app that sells through RevenueCat cannot set).
+    ///   When the purchase does carry the token, the token wins and the visitor id
+    ///   is not used.
     public static func verifyPurchase(transactionId: String) {
         guard let tx = transport else { return }
         guard let fields = purchaseFields(transactionId: transactionId) else { return }

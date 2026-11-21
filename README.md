@@ -41,13 +41,13 @@ Anything a device can claim, anyone can forge.
 Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/rishabhrk2345/Roas-ios-SDK", from: "0.1.15")
+.package(url: "https://github.com/rishabhrk2345/Roas-ios-SDK", from: "0.1.16")
 ```
 
 CocoaPods — this is **not** on the CocoaPods trunk, so name the source yourself:
 
 ```ruby
-pod 'RoasSensor', :git => 'https://github.com/rishabhrk2345/Roas-ios-SDK.git', :tag => '0.1.15'
+pod 'RoasSensor', :git => 'https://github.com/rishabhrk2345/Roas-ios-SDK.git', :tag => '0.1.16'
 ```
 
 > Both resolve against a **git tag**, so releasing means tagging the repo, not
@@ -135,6 +135,29 @@ no secret at all. With no key saved the endpoint answers 422 and books nothing;
 the notification still arrives as before. RevenueCat users keep
 `…/webhooks/revenuecat/<public_key>` and pass `visitorId()` as the `appUserID`
 instead.
+
+### Automatic purchase reporting (`observePurchases`, iOS 15+)
+
+```swift
+Roas.configure(publicKey: "…", appSecret: "…", observePurchases: true)
+```
+
+With this on, the SDK watches the App Store itself and asks the collector to
+verify every purchase and renewal, so the app writes no `verifyPurchase` call and
+a sale is reported however it was made (StoreKit 1 or 2, RevenueCat, a renewal
+that happened while the app was closed). Only the transaction id is sent; the
+amount, currency and product are Apple's. It never calls `finish()`.
+
+- **Needs the In-App Purchase key** saved on the app (Revenue tab). Without one
+  the collector refuses each question and books nothing.
+- **Reports only purchases made after it was switched on for this install**, so a
+  reinstalled app never reports the person's old history against a new install.
+- **Off by default**, so upgrading the SDK changes nothing until you opt in.
+- The sale is attributed through the install's visitor id carried on the request
+  (an app on RevenueCat cannot set `appAccountToken`), or through the token when
+  the purchase carries one.
+- The same sale arriving from RevenueCat or Apple's notification is recognised,
+  not double-counted.
 
 ## The iOS attribution reality (be honest with customers)
 

@@ -40,7 +40,14 @@ final class Storage {
     private let consentKey = "com.roassensor.sdk.consent"
     private let skanRegisteredAtKey = "com.roassensor.sdk.skan_registered_at"
     private let skanStateKey = "com.roassensor.sdk.skan_state"
+    private let reportedPurchasesKey = "com.roassensor.sdk.reported_purchases"
+    private let purchaseObserveSinceKey = "com.roassensor.sdk.purchase_observe_since"
     private let maxQueue = 500
+    /// Transaction ids kept in the "already reported" ledger. A subscription
+    /// renews at most monthly or weekly, so this holds years of renewals; the
+    /// server dedupes on the transaction id anyway, so an id aged out of the
+    /// ledger costs one repeated question to Apple, never a double sale.
+    static let maxReportedPurchases = 300
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -138,6 +145,36 @@ final class Storage {
         }
     }
 
+    // MARK: - Purchase observation (see PurchaseObserver)
+
+    /// When purchase observation first started on THIS install. Only purchases
+    /// made at or after this moment are reported: StoreKit lists a person's whole
+    /// history on a reinstalled app, and reporting an old sale against a fresh
+    /// install's visitor id would credit a campaign that never earned it.
+    /// 0 = not started yet. Cleared by `resetForNewInstall`.
+    var purchaseObserveSince: TimeInterval {
+        get { defaults.double(forKey: purchaseObserveSinceKey) }
+        set { defaults.set(newValue, forKey: purchaseObserveSinceKey) }
+    }
+
+    /// Record that a transaction is being reported, and say whether THIS call was
+    /// the first to do so. Check-and-add under one lock, so the listener and a
+    /// foreground sweep that both see the same transaction cannot both report it.
+    func claimPurchase(_ transactionId: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        var ids = defaults.stringArray(forKey: reportedPurchasesKey) ?? []
+        if ids.contains(transactionId) { return false }
+        ids.append(transactionId)
+        while ids.count > Storage.maxReportedPurchases { ids.removeFirst() }
+        defaults.set(ids, forKey: reportedPurchasesKey)
+        return true
+    }
+
+    func hasReportedPurchase(_ transactionId: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return (defaults.stringArray(forKey: reportedPurchasesKey) ?? []).contains(transactionId)
+    }
+
     // MARK: - Session state (see SessionTracker)
     //
     // Persisted rather than held in memory because iOS jettisons suspended apps
@@ -227,6 +264,10 @@ final class Storage {
         // A new install registers again and starts Apple's windows over.
         defaults.removeObject(forKey: skanRegisteredAtKey)
         defaults.removeObject(forKey: skanStateKey)
+        // A new install has bought nothing yet: the ledger and the start time
+        // belong to the install they were recorded on.
+        defaults.removeObject(forKey: reportedPurchasesKey)
+        defaults.removeObject(forKey: purchaseObserveSinceKey)
         lock.unlock()
     }
 

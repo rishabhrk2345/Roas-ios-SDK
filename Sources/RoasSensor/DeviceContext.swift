@@ -150,7 +150,12 @@ enum DeviceContext {
     /// 0.1.15 defaults to https://core.roassensor.com (api.roassensor.com has no
     /// DNS) and sanitises `track(properties:)`, which crashed the host app on a
     /// Date, URL or NaN.
-    static let sdkVersion = "0.1.15"
+    ///
+    /// 0.1.16 adds `Roas.configure(observePurchases: true)` (iOS 15+): the SDK watches
+    /// the App Store and asks the collector to verify every purchase and renewal, so
+    /// an app on RevenueCat or StoreKit 2 needs no `verifyPurchase` call. Off by
+    /// default. Needs the App Store In-App Purchase key on the app's Revenue tab.
+    static let sdkVersion = "0.1.16"
 
     /// The hardware identifier — `iPhone14,5`, `iPad13,1`. The iOS analogue of
     /// Android's `Build.MODEL`: the key Apple's own device tables join on, and
